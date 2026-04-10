@@ -21,6 +21,38 @@ This HUD brings **all essential actions directly onto the map**, reducing clicks
 
 ---
 
+## 🖼️ Preview
+
+### Main HUD
+
+![HUD Main](screenshot1.png)
+
+### Skills panel
+
+![Skills](screenshot2.png)
+
+### Saving Throws (JDS)
+
+![JDS](screenshot3.png)
+
+### Attributes
+
+![Attributes](screenshot4.png)
+
+### Combat actions
+
+![Combat](screenshot5.png)
+
+### Resources
+
+![Resources](screenshot6.png)
+
+### Global modifiers
+
+![Mods](screenshot7.png)
+
+---
+
 ## ✨ Features
 
 * ⚡ Compact HUD centered on screen
@@ -40,27 +72,9 @@ This HUD brings **all essential actions directly onto the map**, reducing clicks
   * Normal / Advantage / Disadvantage
   * Synced with character sheet
 * 🧪 Dynamic Resources
-
-  * Auto-detection
-  * Increment / decrement
 * 🛡️ Global Modifiers
-
-  * Attack / Damage / Saves / AC
-* ⚔️ Combat system
-
-  * Auto-detects weapons
-  * One-click actions
+* ⚔️ Auto-detected combat actions
 * 🎨 Clean dark fantasy UI
-
----
-
-## 🖼️ Preview
-
-*Add your screenshot here*
-
-```md
-![HUD Screenshot](screenshot.png)
-```
 
 ---
 
@@ -71,11 +85,15 @@ This HUD brings **all essential actions directly onto the map**, reducing clicks
    👉 https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/roll20_hud.user.js
 3. Open Roll20
 
+### ⚠️ Important
+
+You must roll **initiative once** after loading the page to allow the HUD to detect and sync your character data.
+
+Without this, some values may not initialize correctly.
+
 ---
 
 ## 🧩 How it works
-
-The HUD is built around 3 main areas:
 
 * **Main bar** → stats & roll modes
 * **Action buttons** → navigation
@@ -86,7 +104,7 @@ The HUD is built around 3 main areas:
 ## ⚠️ Limitations
 
 * Depends on Roll20 DOM (may break with updates)
-* Designed for D&D 5e sheets
+* Designed for D&D 5e
 * Requires Tampermonkey
 
 ---
@@ -97,17 +115,6 @@ This project was built with the help of:
 
 * ChatGPT
 * Codex
-
-The goal was rapid iteration and practical usability in real gameplay.
-
----
-
-## 💡 Roadmap
-
-* Drag & reposition HUD
-* Favorites / shortcuts
-* Context-aware UI
-* Combat log
 
 ---
 
@@ -134,6 +141,38 @@ Ce HUD apporte **toutes les actions essentielles directement sur la map**, rédu
 
 ---
 
+## 🖼️ Aperçu
+
+### HUD principal
+
+![HUD Main](screenshot1.png)
+
+### Compétences
+
+![Skills](screenshot2.png)
+
+### Jets de sauvegarde
+
+![JDS](screenshot3.png)
+
+### Attributs
+
+![Attributes](screenshot4.png)
+
+### Combat
+
+![Combat](screenshot5.png)
+
+### Ressources
+
+![Resources](screenshot6.png)
+
+### Modificateurs globaux
+
+![Mods](screenshot7.png)
+
+---
+
 ## ✨ Fonctionnalités
 
 * ⚡ HUD compact centré
@@ -141,39 +180,14 @@ Ce HUD apporte **toutes les actions essentielles directement sur la map**, rédu
 
   * Attributs
   * Jets de sauvegarde
-  * Compétences (18 boutons)
+  * Compétences
   * Actions de combat
 * ❤️ Gestion des PV
-
-  * Actuel / Max / Temp
-  * Dés de vie (DV)
-  * Boutons + / -
 * 🎲 Modes de jets
-
-  * Normal / Avantage / Désavantage
-  * Synchronisé avec la fiche
 * 🧪 Ressources dynamiques
-
-  * Détection automatique
-  * Incrémentation / décrémentation
 * 🛡️ Modificateurs globaux
-
-  * Attaque / dégâts / sauvegardes / CA
-* ⚔️ Système de combat
-
-  * Détection automatique des armes
-  * Actions en un clic
+* ⚔️ Actions automatiques
 * 🎨 Interface sombre immersive
-
----
-
-## 🖼️ Aperçu
-
-*Ajoute ton screenshot ici*
-
-```md
-![HUD Screenshot](screenshot.png)
-```
 
 ---
 
@@ -184,21 +198,23 @@ Ce HUD apporte **toutes les actions essentielles directement sur la map**, rédu
    👉 https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/roll20_hud.user.js
 3. Ouvrir Roll20
 
+### ⚠️ Important
+
+Vous devez effectuer **un jet d’initiative une fois** après le chargement pour que le HUD synchronise les données.
+
 ---
 
 ## 🧩 Fonctionnement
 
-Le HUD repose sur 3 zones :
-
 * **Barre principale** → stats & modes
 * **Boutons d’action** → navigation
-* **Panneau dynamique** → contenu contextuel
+* **Panneau dynamique** → contenu
 
 ---
 
 ## ⚠️ Limitations
 
-* Dépend du DOM Roll20 (peut casser avec des mises à jour)
+* Dépend du DOM Roll20
 * Conçu pour D&D 5e
 * Nécessite Tampermonkey
 
@@ -206,21 +222,10 @@ Le HUD repose sur 3 zones :
 
 ## 🤖 Développement
 
-Ce projet a été réalisé avec l’aide de :
+Projet réalisé avec :
 
 * ChatGPT
 * Codex
-
-Objectif : itération rapide et utilisation réelle en jeu.
-
----
-
-## 💡 Roadmap
-
-* Déplacement du HUD
-* Favoris / raccourcis
-* UI contextuelle
-* Journal de combat
 
 ---
 
