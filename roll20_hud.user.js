@@ -9,7 +9,7 @@
 (function () {
   'use strict';
 
-  const BASE = 'https://raw.githubusercontent.com/Xarann/roll20_icons/main/';
+  const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   const icon = (name) => `${BASE}${name}%20(96x96).png`;
 
   let LOCKED_CHAR = null;
