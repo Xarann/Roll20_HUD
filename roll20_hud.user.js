@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Roll20 HUD
+// @name         Roll20 HUD Next (Full)
 // @namespace    http://tampermonkey.net/
-// @version      7.09
+// @version      8.00
 // @match        https://app.roll20.net/editor/
 // @grant        none
 // ==/UserScript==
@@ -9,7 +9,9 @@
 (function () {
   'use strict';
 
-  const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
+/* ================= STATE ================= */
+
+const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   const icon = (name) => `${BASE}${name}%20(96x96).png`;
 
   let LOCKED_CHAR = null;
@@ -28,28 +30,192 @@
   let SELECTED_EQUIPMENT_CATEGORY = '';
   let SPELL_SHOW_ALL = localStorage.getItem('tm_spell_show_all') === '1';
 
-  /* ================= CHARACTER ================= */
+/* ================= CHARACTER ================= */
 
   function getPlayerId() {
     return window.currentPlayer?.id;
   }
 
-  function autoDetectCharacter() {
-    const playerId = getPlayerId();
+  function getCharacterId(char) {
+    return String(char?.id || char?.get?.('_id') || '').trim();
+  }
+
+  function getCharacterDisplayName(char) {
+    const name = String(char?.get?.('name') || '').trim();
+    if (name) return name;
+    return 'Fiche sans nom';
+  }
+
+  function getAvailableCharacters() {
     const chars = window.Campaign?.characters?.models || [];
-    return (
-      chars.find((c) => (c.get('controlledby') || '').includes(playerId)) ||
-      chars[0] ||
-      null
-    );
+    if (!chars.length) return [];
+
+    const playerId = getPlayerId();
+    const isGm = Boolean(window.currentPlayer?.get?.('is_gm') || window.currentPlayer?.is_gm || window.is_gm);
+
+    const controlled = chars.filter((char) => {
+      if (!char) return false;
+      if (isGm) return true;
+
+      const controlledBy = String(char.get('controlledby') || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+      if (!controlledBy.length) return false;
+      if (controlledBy.includes('all')) return true;
+      return Boolean(playerId && controlledBy.includes(playerId));
+    });
+
+    return controlled.length ? controlled : chars;
+  }
+
+  function autoDetectCharacter() {
+    const chars = getAvailableCharacters();
+    return chars[0] || null;
   }
 
   function getSelectedChar() {
-    if (!LOCKED_CHAR) LOCKED_CHAR = autoDetectCharacter();
+    const chars = getAvailableCharacters();
+    if (!chars.length) {
+      LOCKED_CHAR = null;
+      return null;
+    }
+
+    if (!LOCKED_CHAR) {
+      LOCKED_CHAR = autoDetectCharacter();
+      return LOCKED_CHAR;
+    }
+
+    const lockedId = getCharacterId(LOCKED_CHAR);
+    const updated = chars.find((char) => getCharacterId(char) === lockedId);
+    if (updated) {
+      LOCKED_CHAR = updated;
+      return LOCKED_CHAR;
+    }
+
+    LOCKED_CHAR = autoDetectCharacter();
     return LOCKED_CHAR;
   }
 
-  /* ================= COMMAND ================= */
+  function updateCharacterSwitchButton() {
+    if (!root) return;
+
+    const toggle = root.querySelector('.toggle[data-sec="characters"]');
+    if (!toggle) return;
+
+    const chars = getAvailableCharacters();
+    const current = getSelectedChar();
+    const name = getCharacterDisplayName(current);
+    const count = chars.length;
+
+    const tooltip =
+      count > 1
+        ? `Fiche active : ${name} (${count} fiches, clic pour choisir)`
+        : `Fiche active : ${name}`;
+    toggle.dataset.label = tooltip;
+    toggle.setAttribute('aria-label', tooltip);
+  }
+
+  function refreshHudAfterCharacterSwitch() {
+    updateCharacterSwitchButton();
+
+    SELECTED_TRAIT_KEY = '';
+    SELECTED_SPELL_KEY = '';
+    SELECTED_EQUIPMENT_CATEGORY = '';
+
+    renderHpState();
+    syncGlobalMasterFlags();
+    recomputeGlobalModifierDerivedAttrs();
+
+    const fromChar = detectRollModeFromCharacterAttr();
+    if (fromChar) {
+      setRollMode(fromChar, false);
+    } else {
+      syncRollModeFromSheet();
+    }
+
+    if (!currentSection || !currentPopup || !root) return;
+    const sec = currentSection;
+    const anchor = root.querySelector(`.toggle[data-sec="${sec}"]`);
+    closePopup();
+    if (anchor) open(sec, anchor);
+  }
+
+  function switchHudCharacter(step = 1) {
+    const chars = getAvailableCharacters();
+    if (!chars.length) {
+      LOCKED_CHAR = null;
+      updateCharacterSwitchButton();
+      return;
+    }
+
+    const current = getSelectedChar();
+    const currentId = getCharacterId(current);
+    const currentIndex = chars.findIndex((char) => getCharacterId(char) === currentId);
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+    const nextIndex = ((baseIndex + step) % chars.length + chars.length) % chars.length;
+
+    LOCKED_CHAR = chars[nextIndex];
+    refreshHudAfterCharacterSwitch();
+  }
+
+  function selectHudCharacterById(charId) {
+    const wantedId = String(charId || '').trim();
+    if (!wantedId) return false;
+
+    const chars = getAvailableCharacters();
+    if (!chars.length) return false;
+
+    const found = chars.find((char) => getCharacterId(char) === wantedId);
+    if (!found) return false;
+
+    LOCKED_CHAR = found;
+    refreshHudAfterCharacterSwitch();
+    return true;
+  }
+
+  function buildCharacterPickerContent() {
+    const chars = getAvailableCharacters();
+    const active = getSelectedChar();
+    const activeId = getCharacterId(active);
+    const activeName = getCharacterDisplayName(active);
+
+    if (!chars.length) {
+      return `
+        <div class="tm-hud-wrap tm-char-picker-wrap">
+          <div class="tm-detail-empty">Aucune fiche disponible.</div>
+        </div>
+      `;
+    }
+
+    const list = chars
+      .map((char, index) => {
+        const id = getCharacterId(char);
+        const name = getCharacterDisplayName(char);
+        const isActive = id === activeId;
+        const activeBadge = isActive ? '<span class="tm-char-item-badge">ACTIF</span>' : '';
+        return `
+          <button class="tm-list-item tm-char-item ${isActive ? 'is-active' : ''}"
+                  data-char-select="${escapeHtml(id)}"
+                  data-label="Choisir la fiche ${escapeHtml(name)}">
+            <span class="tm-char-item-name">${index + 1}. ${escapeHtml(name)}</span>
+            ${activeBadge}
+          </button>
+        `;
+      })
+      .reverse()
+      .join('');
+
+    return `
+      <div class="tm-hud-wrap tm-char-picker-wrap">
+        <div class="tm-char-active">Fiche active : <span class="tm-char-active-name">${escapeHtml(activeName)}</span></div>
+        <div class="tm-char-list">${list}</div>
+      </div>
+    `;
+  }
+
+/* ================= COMMAND ================= */
 
   const CMD = {
     strength: 'strength',
@@ -443,7 +609,7 @@
     return false;
   }
 
-  /* ================= ROLL MODE ================= */
+/* ================= ROLL MODE ================= */
 
   function normalizeRollMode(raw) {
     const value = String(raw || '').toLowerCase().trim();
@@ -714,7 +880,7 @@
     return Boolean(okAdv || okRtype);
   }
 
-  /* ================= HP ================= */
+/* ================= HP ================= */
 
   function parseIntSafe(value, fallback) {
     const n = Number.parseInt(String(value ?? '').trim(), 10);
@@ -853,7 +1019,7 @@
     renderHpState();
   }
 
-  /* ================= RESOURCES ================= */
+/* ================= RESOURCES ================= */
 
   function getAttrCurrentValue(char, name) {
     const model = getCharAttrModel(char, name);
@@ -1474,7 +1640,7 @@
     `;
   }
 
-  /* ================= GLOBAL MODIFIERS ================= */
+/* ================= GLOBAL MODIFIERS ================= */
 
   const GLOBAL_MOD_CONFIG = [
     {
@@ -1987,7 +2153,7 @@
     });
   }
 
-  /* ================= REPEATING ATTACKS ================= */
+/* ================= REPEATING ATTACKS ================= */
 
   function getRepeatingSectionRows(char, section) {
     const attrs = char?.attribs?.models || [];
@@ -2062,7 +2228,7 @@
     return [];
   }
 
-  /* ================= TRAITS ================= */
+/* ================= TRAITS ================= */
 
   function pickRowFieldValue(fields, candidates) {
     const normalized = candidates.map((c) => String(c).toLowerCase());
@@ -2262,7 +2428,7 @@
     `;
   }
 
-  /* ================= EQUIPMENT ================= */
+/* ================= EQUIPMENT ================= */
 
   function sheetCheckboxValue(raw) {
     const token = normalizeTextToken(raw);
@@ -2414,7 +2580,7 @@
     `;
   }
 
-  /* ================= SPELLS ================= */
+/* ================= SPELLS ================= */
 
   function getSpellMemAttrName(rowId) {
     return `hud_spell_memorized_${String(rowId || '').trim()}`;
@@ -3288,7 +3454,7 @@
     `;
   }
 
-  /* ================= BUILD ================= */
+/* ================= BUILD ================= */
 
   function build(cols) {
     const rows = [[], [], []];
@@ -3347,7 +3513,7 @@
     'deception',
   ];
 
-  /* ================= ROOT ================= */
+/* ================= ROOT ================= */
 
   const root = document.createElement('div');
   root.id = 'tm-root';
@@ -3355,6 +3521,9 @@
   root.innerHTML = `
     <div id="tm-bar">
       <div id="tm-left-tools">
+        <div class="toggle icon-only" data-sec="characters" data-label="Fiches">
+          <img src="${icon('Fiches')}">
+        </div>
         <div class="toggle icon-only" data-sec="currency" data-label="Bourse">
           <img src="${icon('coins')}">
         </div>
@@ -3433,7 +3602,7 @@
   tooltip.id = 'tm-tooltip';
   document.body.appendChild(tooltip);
 
-  /* ================= STYLE ================= */
+/* ================= STYLE ================= */
 
   const style = document.createElement('style');
   style.innerHTML = `
@@ -3681,6 +3850,12 @@
       transform:none;
     }
 
+    .tm-popup.tm-popup-characters{
+      left:0;
+      bottom:calc(100% + var(--tm-cell-gap));
+      transform:none;
+    }
+
     .tm-row{display:flex;gap:4px}
     .tm-cell{display:flex}
     .tm-cell-wide{width:var(--tm-accordion-width)}
@@ -3777,6 +3952,68 @@
     .tm-fold-toggle.is-active{
       background:rgba(28,130,58,0.28);
       outline:1px solid rgba(126,255,170,0.55);
+    }
+
+    .tm-char-picker-wrap{
+      gap:6px;
+    }
+
+    .tm-char-active{
+      color:#d9d9d9;
+      font-size:10px;
+      line-height:1.3;
+      padding:0 2px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+
+    .tm-char-active-name{
+      color:#fff;
+      font-weight:700;
+    }
+
+    .tm-char-list{
+      display:flex;
+      flex-direction:column;
+      gap:3px;
+      max-height:240px;
+      overflow:auto;
+      padding-right:2px;
+    }
+
+    .tm-char-item{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:6px;
+      border-color:rgba(120,193,255,0.65);
+      color:#e9f6ff;
+    }
+
+    .tm-char-item.is-active{
+      background:rgba(31,74,124,0.35);
+      outline-color:rgba(120,193,255,0.85);
+    }
+
+    .tm-char-item-name{
+      flex:1 1 auto;
+      min-width:0;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      text-align:left;
+    }
+
+    .tm-char-item-badge{
+      flex:0 0 auto;
+      font-size:9px;
+      font-weight:700;
+      color:#8de0a8;
+      border:1px solid rgba(141,224,168,0.55);
+      border-radius:999px;
+      padding:1px 5px 0;
+      line-height:1.25;
     }
 
     .tm-equip-static-toggle{
@@ -4309,7 +4546,7 @@
   `;
   document.head.appendChild(style);
 
-  /* ================= POPUP ================= */
+/* ================= POPUP ================= */
 
   function closePopup() {
     if (!currentPopup) return;
@@ -4368,6 +4605,10 @@
       content = buildCurrencyPanelContent();
     }
 
+    if (sec === 'characters') {
+      content = buildCharacterPickerContent();
+    }
+
     if (sec === 'mods') {
       content = buildGlobalModsContent();
     }
@@ -4397,6 +4638,9 @@
     if (sec === 'settings') {
       popup.classList.add('tm-popup-settings');
       el.appendChild(popup);
+    } else if (sec === 'characters') {
+      popup.classList.add('is-wide', 'tm-popup-characters');
+      el.appendChild(popup);
     } else if (sec === 'currency') {
       popup.classList.add('is-wide', 'tm-popup-currency');
       el.appendChild(popup);
@@ -4415,7 +4659,7 @@
     currentSection = sec;
   }
 
-  /* ================= VISUAL ================= */
+/* ================= VISUAL ================= */
 
   function updateScale(delta) {
     SCALE = Math.max(0.6, Math.min(1.6, SCALE + delta));
@@ -4434,11 +4678,16 @@
     tooltip.style.opacity = '0';
   }
 
-  /* ================= EVENTS ================= */
+/* ================= EVENTS ================= */
 
   root.addEventListener('click', (e) => {
     const btn = e.target.closest('button');
     if (btn && root.contains(btn)) {
+      if (btn.dataset.charSelect) {
+        selectHudCharacterById(btn.dataset.charSelect);
+        return;
+      }
+
       if (btn.dataset.hpTarget) {
         const delta = parseIntSafe(btn.dataset.delta, 0);
         if (delta !== 0) adjustHpValue(btn.dataset.hpTarget, delta);
@@ -4618,14 +4867,16 @@
 
   root.addEventListener('mouseleave', hideTooltip);
 
-  /* ================= INIT ================= */
+/* ================= INIT ================= */
 
+  updateCharacterSwitchButton();
   renderHpState();
   syncGlobalMasterFlags();
   recomputeGlobalModifierDerivedAttrs();
   setRollMode(detectRollMode(), false);
   setTimeout(syncRollModeFromSheet, 1000);
   setInterval(() => {
+    updateCharacterSwitchButton();
     renderHpState();
     syncGlobalMasterFlags();
     recomputeGlobalModifierDerivedAttrs();
