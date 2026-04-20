@@ -40,6 +40,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   let SELECTED_TRAIT_KEY = '';
   let SELECTED_SPELL_KEY = '';
   let SELECTED_EQUIPMENT_CATEGORY = '';
+  let MJ_MODE_ENABLED = localStorage.getItem('tm_hud_mj_mode') === '1';
+  let CHARACTER_FILTER_QUERY = localStorage.getItem('tm_character_filter') || '';
   let SPELL_SHOW_ALL = localStorage.getItem('tm_spell_show_all') === '1';
   const PREFETCHED_CHAR_IDS = new Set();
   const PREFETCH_PENDING_CHAR_IDS = new Set();
@@ -48,6 +50,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
   function getPlayerId() {
     return window.currentPlayer?.id;
+  }
+
+  function isCurrentPlayerGm() {
+    return Boolean(window.currentPlayer?.get?.('is_gm') || window.currentPlayer?.is_gm || window.is_gm);
   }
 
   function getCharacterId(char) {
@@ -99,7 +105,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     if (!chars.length) return [];
 
     const playerId = getPlayerId();
-    const isGm = Boolean(window.currentPlayer?.get?.('is_gm') || window.currentPlayer?.is_gm || window.is_gm);
+    const isGm = isCurrentPlayerGm();
 
     const controlled = chars.filter((char) => {
       if (!char) return false;
@@ -144,6 +150,102 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     LOCKED_CHAR = autoDetectCharacter();
     return LOCKED_CHAR;
+  }
+
+  function getSelectedGraphicModels() {
+    const results = [];
+    const seenIds = new Set();
+
+    const pushGraphicModel = (entry) => {
+      const model = entry?.model || entry;
+      if (!model || typeof model.get !== 'function') return;
+
+      const type = String(model.get('_type') || '').toLowerCase();
+      if (type && type !== 'graphic') return;
+
+      const id = String(model.id || model.get('_id') || '').trim();
+      if (id && seenIds.has(id)) return;
+      if (id) seenIds.add(id);
+      results.push(model);
+    };
+
+    const collect = (raw) => {
+      if (!raw) return;
+      if (Array.isArray(raw)) {
+        raw.forEach(pushGraphicModel);
+        return;
+      }
+      pushGraphicModel(raw);
+    };
+
+    try {
+      const selectedFn = window.d20?.engine?.selected;
+      if (typeof selectedFn === 'function') {
+        collect(selectedFn.call(window.d20.engine));
+      }
+    } catch (_error) {}
+
+    try {
+      const canvas = window.d20?.engine?.canvas;
+      if (canvas && typeof canvas.getActiveObjects === 'function') {
+        collect(canvas.getActiveObjects());
+      } else if (canvas && typeof canvas.getActiveObject === 'function') {
+        collect(canvas.getActiveObject());
+      }
+    } catch (_error) {}
+
+    return results;
+  }
+
+  function getCharacterIdFromGraphicModel(graphicModel) {
+    if (!graphicModel) return '';
+    return String(graphicModel.get?.('represents') || graphicModel.attributes?.represents || '').trim();
+  }
+
+  function getCharacterFromSelectedToken() {
+    const chars = getAvailableCharacters();
+    if (!chars.length) return null;
+
+    const byId = new Map();
+    chars.forEach((char) => {
+      const id = getCharacterId(char);
+      if (id) byId.set(id, char);
+    });
+
+    const selectedGraphics = getSelectedGraphicModels();
+    for (const graphic of selectedGraphics) {
+      const representedId = getCharacterIdFromGraphicModel(graphic);
+      if (!representedId) continue;
+      const found = byId.get(representedId);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  function syncHudCharacterFromSelectedToken() {
+    if (!MJ_MODE_ENABLED || !isCurrentPlayerGm()) return false;
+
+    const representedChar = getCharacterFromSelectedToken();
+    if (!representedChar) return false;
+
+    const representedId = getCharacterId(representedChar);
+    if (!representedId) return false;
+
+    const currentId = getCharacterId(getSelectedChar());
+    if (representedId === currentId) return false;
+
+    return selectHudCharacterById(representedId);
+  }
+
+  function setHudMjModeEnabled(enabled, options = null) {
+    const opts = { syncNow: true, ...(options || {}) };
+    MJ_MODE_ENABLED = Boolean(enabled && isCurrentPlayerGm());
+    localStorage.setItem('tm_hud_mj_mode', MJ_MODE_ENABLED ? '1' : '0');
+    updateCharacterSwitchButton();
+    if (MJ_MODE_ENABLED && opts.syncNow) {
+      syncHudCharacterFromSelectedToken();
+    }
   }
 
   function getCharacterAttrCount(char) {
@@ -204,6 +306,11 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   function updateCharacterSwitchButton() {
     if (!root) return;
 
+    if (MJ_MODE_ENABLED && !isCurrentPlayerGm()) {
+      MJ_MODE_ENABLED = false;
+      localStorage.setItem('tm_hud_mj_mode', '0');
+    }
+
     const toggle = root.querySelector('.toggle[data-sec="characters"]');
     if (!toggle) return;
 
@@ -212,11 +319,12 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const name = getCharacterDisplayName(current);
     const typeInfo = getCharacterSheetTypeUi(current);
     const count = chars.length;
+    const modeHint = isCurrentPlayerGm() && MJ_MODE_ENABLED ? ' | Mode MJ' : '';
 
     const tooltip =
       count > 1
-        ? `Fiche active : ${name} [${typeInfo.label}] (${count} fiches, clic pour choisir)`
-        : `Fiche active : ${name} [${typeInfo.label}]`;
+        ? `Fiche active : ${name} [${typeInfo.label}]${modeHint} (${count} fiches, clic pour choisir)`
+        : `Fiche active : ${name} [${typeInfo.label}]${modeHint}`;
     toggle.dataset.label = tooltip;
     toggle.setAttribute('aria-label', tooltip);
   }
@@ -301,6 +409,9 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const activeId = getCharacterId(active);
     const activeName = getCharacterDisplayName(active);
     const activeType = getCharacterSheetTypeUi(active);
+    const isGm = isCurrentPlayerGm();
+    const queryRaw = String(CHARACTER_FILTER_QUERY || '').trimStart();
+    const queryToken = normalizeSheetTypeToken(queryRaw);
 
     if (!chars.length) {
       return `
@@ -310,27 +421,50 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       `;
     }
 
-    const list = chars
-      .map((char, index) => {
-        const id = getCharacterId(char);
-        const name = getCharacterDisplayName(char);
-        const typeInfo = getCharacterSheetTypeUi(char);
-        const isActive = id === activeId;
-        const activeBadge = isActive ? '<span class="tm-char-item-badge">ACTIF</span>' : '';
-        return `
-          <button class="tm-list-item tm-char-item ${isActive ? 'is-active' : ''}"
-                  data-char-select="${escapeHtml(id)}"
-                  data-label="Choisir la fiche ${escapeHtml(name)}">
-            <span class="tm-char-item-namewrap">
-              <span class="tm-char-item-name">${index + 1}. ${escapeHtml(name)}</span>
-              <span class="tm-sheet-type-badge ${typeInfo.className}">${typeInfo.label}</span>
-            </span>
-            ${activeBadge}
-          </button>
-        `;
-      })
-      .reverse()
-      .join('');
+    const filteredChars = queryToken
+      ? chars.filter((char) => normalizeSheetTypeToken(getCharacterDisplayName(char)).includes(queryToken))
+      : chars;
+
+    const list = filteredChars.length
+      ? filteredChars
+          .map((char, index) => {
+            const id = getCharacterId(char);
+            const name = getCharacterDisplayName(char);
+            const typeInfo = getCharacterSheetTypeUi(char);
+            const isActive = id === activeId;
+            const activeBadge = isActive ? '<span class="tm-char-item-badge">ACTIF</span>' : '';
+            return `
+              <button class="tm-list-item tm-char-item ${isActive ? 'is-active' : ''}"
+                      data-char-select="${escapeHtml(id)}"
+                      data-label="Choisir la fiche ${escapeHtml(name)}">
+                <span class="tm-char-item-namewrap">
+                  <span class="tm-char-item-name">${index + 1}. ${escapeHtml(name)}</span>
+                  <span class="tm-sheet-type-badge ${typeInfo.className}">${typeInfo.label}</span>
+                </span>
+                ${activeBadge}
+              </button>
+            `;
+          })
+          .reverse()
+          .join('')
+      : `<div class="tm-mod-empty">Aucune fiche trouvée${queryRaw ? ` pour "${escapeHtml(queryRaw)}"` : ''}.</div>`;
+
+    const clearButton = queryRaw
+      ? `
+        <button class="tm-char-search-clear" data-char-filter-clear="1" data-label="Effacer la recherche">
+          ✕
+        </button>
+      `
+      : '';
+
+    const mjModeBlock = isGm
+      ? `
+        <label class="tm-char-mj-toggle" data-label="Mode MJ: suit la fiche du token sélectionné">
+          <input type="checkbox" data-char-mj-mode="1" ${MJ_MODE_ENABLED ? 'checked' : ''}>
+          <span>Mode MJ (suivre token sélectionné)</span>
+        </label>
+      `
+      : '';
 
     return `
       <div class="tm-hud-wrap tm-char-picker-wrap">
@@ -339,7 +473,21 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
           <span class="tm-char-active-name">${escapeHtml(activeName)}</span>
           <span class="tm-sheet-type-badge ${activeType.className}">${activeType.label}</span>
         </div>
+        <div class="tm-char-search">
+          <input
+            type="text"
+            class="tm-char-search-input"
+            data-char-filter="1"
+            value="${escapeHtml(queryRaw)}"
+            placeholder="Rechercher une fiche..."
+            autocomplete="off"
+            spellcheck="false"
+            data-label="Recherche partielle de fiche">
+          ${clearButton}
+        </div>
+        <div class="tm-char-search-meta">${filteredChars.length}/${chars.length} fiches</div>
         <div class="tm-char-list">${list}</div>
+        ${mjModeBlock}
       </div>
     `;
   }
@@ -586,13 +734,13 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const label = LABELS[cmd];
 
     if (cmd === 'dv' || cmd === 'death' || cmd === 'rest_long' || cmd === 'rest_short') {
-      let className = 'txt';
-      if (cmd === 'rest_long') className = 'txt rest-btn rest-long';
-      if (cmd === 'rest_short') className = 'txt rest-btn rest-short';
+      let className = 'tm-core-btn txt';
+      if (cmd === 'rest_long') className = 'tm-core-btn txt rest-btn rest-long';
+      if (cmd === 'rest_short') className = 'tm-core-btn txt rest-btn rest-short';
       return `<button data-cmd="${cmd}" data-label="${label}" class="${className}">${label}</button>`;
     }
 
-    return `<button data-cmd="${cmd}" data-label="${label}">
+    return `<button data-cmd="${cmd}" data-label="${label}" class="tm-core-btn">
       <img src="${icon(cmd)}">
     </button>`;
   }
@@ -656,7 +804,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       .replace(/"/g, '\\"');
   }
 
-  function triggerTraitRollFromSheet(rowId, rollAttrName = '') {
+  function triggerTraitRollFromSheet(rowId, rollAttrName = '', traitName = '') {
     const rid = String(rowId || '').trim();
     if (!rid) return false;
     const char = getSelectedChar();
@@ -677,13 +825,39 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     };
 
     const preferredAttr = String(rollAttrName || '').trim();
+    const rows = getRepeatingSectionRows(char, 'repeating_traits');
+    const rowIndex = rows.findIndex((row) => String(row?.rowId || '').trim() === rid);
+    const indexedPrefix = rowIndex >= 0 ? `repeating_traits_$${rowIndex}` : '';
     const attrCandidates = [
       preferredAttr,
       `repeating_traits_${rid}_rollTrait`,
       `repeating_traits_${rid}_rolltrait`,
       `repeating_traits_${rid}_roll_trait`,
       `repeating_traits_${rid}_trait`,
+      `repeating_traits_${rid}_output`,
+      indexedPrefix ? `${indexedPrefix}_rollTrait` : '',
+      indexedPrefix ? `${indexedPrefix}_rolltrait` : '',
+      indexedPrefix ? `${indexedPrefix}_roll_trait` : '',
+      indexedPrefix ? `${indexedPrefix}_trait` : '',
+      indexedPrefix ? `${indexedPrefix}_output` : '',
     ].filter(Boolean);
+
+    const rowRoots = Array.from(
+      document.querySelectorAll(
+        `[data-reprowid="${esc}"], [data-itemid="${esc}"], .repitem[data-reprowid="${esc}"], .repitem[data-itemid="${esc}"]`
+      )
+    );
+    for (const rowEl of rowRoots) {
+      const rollBtn =
+        rowEl.querySelector('button[name="roll_output"][type="roll"]') ||
+        rowEl.querySelector('button[type="roll"]') ||
+        rowEl.querySelector('button[name^="roll_"]') ||
+        rowEl.querySelector('button[name*="roll"]');
+      if (rollBtn instanceof HTMLElement) {
+        rollBtn.click();
+        return true;
+      }
+    }
 
     for (const attrName of attrCandidates) {
       const model = getCharAttrModel(char, attrName);
@@ -705,14 +879,26 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       `button[name="roll_repeating_traits_${esc}_rolltrait"]`,
       `button[name="roll_repeating_traits_${esc}_roll_trait"]`,
       `button[name="roll_repeating_traits_${esc}_trait"]`,
+      `button[name="roll_repeating_traits_${esc}_output"]`,
+      rowIndex >= 0 ? `button[name="roll_repeating_traits_$${rowIndex}_rollTrait"]` : '',
+      rowIndex >= 0 ? `button[name="roll_repeating_traits_$${rowIndex}_rolltrait"]` : '',
+      rowIndex >= 0 ? `button[name="roll_repeating_traits_$${rowIndex}_roll_trait"]` : '',
+      rowIndex >= 0 ? `button[name="roll_repeating_traits_$${rowIndex}_trait"]` : '',
+      rowIndex >= 0 ? `button[name="roll_repeating_traits_$${rowIndex}_output"]` : '',
       `button[name*="repeating_traits_${esc}"][name*="roll"]`,
+      `[data-reprowid="${esc}"] button[name="roll_output"][type="roll"]`,
       `[data-reprowid="${esc}"] button[name*="rollTrait"]`,
       `[data-reprowid="${esc}"] button[type="roll"]`,
+      `[data-itemid="${esc}"] button[name="roll_output"][type="roll"]`,
       `[data-itemid="${esc}"] button[name*="rollTrait"]`,
       `[data-itemid="${esc}"] button[type="roll"]`,
+      `.repitem[data-reprowid="${esc}"] button[name="roll_output"][type="roll"]`,
       `.repitem[data-reprowid="${esc}"] button[type="roll"]`,
+      `.repitem[data-itemid="${esc}"] button[name="roll_output"][type="roll"]`,
+      `.repitem[data-itemid="${esc}"] button[type="roll"]`,
       `button[name*="${esc}"][name*="rollTrait"]`,
-    ];
+      `button[name*="${esc}"][name*="output"]`,
+    ].filter(Boolean);
 
     for (const selector of buttonSelectors) {
       const btn = document.querySelector(selector);
@@ -725,7 +911,9 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const inputSelectors = [
       `[name="attr_repeating_traits_${esc}_rollTrait"]`,
       `[name="attr_repeating_traits_${esc}_rolltrait"]`,
+      `[name="attr_repeating_traits_${esc}_output"]`,
       `[name*="repeating_traits_${esc}"][name*="rollTrait"]`,
+      `[name*="repeating_traits_${esc}"][name*="output"]`,
       `[name*="repeating_traits_${esc}"][name*="roll"]`,
     ];
     for (const selector of inputSelectors) {
@@ -737,6 +925,37 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       return true;
     }
 
+    // Fallback by visible trait title in the sheet DOM (legacy DD5e often uses a local roll_output button).
+    const wantedName = normalizeTextToken(traitName);
+    if (wantedName) {
+      const titleNodes = Array.from(
+        document.querySelectorAll(
+          '.repcontainer[data-groupname="repeating_traits"] .trait .display .title,' +
+            'fieldset.repeating_traits .trait .display .title,' +
+            '.trait .display .title'
+        )
+      );
+      for (const titleNode of titleNodes) {
+        if (!(titleNode instanceof HTMLElement)) continue;
+        const title = normalizeTextToken(titleNode.textContent || '');
+        if (!title || title !== wantedName) continue;
+        const rootRow =
+          titleNode.closest('.repitem') ||
+          titleNode.closest('.trait') ||
+          titleNode.closest('[data-reprowid]') ||
+          titleNode.closest('[data-itemid]');
+        if (!(rootRow instanceof HTMLElement)) continue;
+        const rollBtn =
+          rootRow.querySelector('button[name="roll_output"][type="roll"]') ||
+          rootRow.querySelector('button[type="roll"]') ||
+          rootRow.querySelector('button[name^="roll_"]');
+        if (rollBtn instanceof HTMLElement) {
+          rollBtn.click();
+          return true;
+        }
+      }
+    }
+
     // Last fallback: try explicit repeating_traits abilities on the character.
     const abilityNames = new Set(
       (char?.abilities?.models || [])
@@ -744,11 +963,18 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         .filter(Boolean)
     );
     const abilityCandidates = [
+      `repeating_traits_${rid}_output`,
+      `repeating_traits_${rid}_roll_output`,
       preferredAttr,
       `repeating_traits_${rid}_rollTrait`,
       `repeating_traits_${rid}_rolltrait`,
       `repeating_traits_${rid}_roll_trait`,
       `repeating_traits_${rid}_trait`,
+      indexedPrefix ? `${indexedPrefix}_rollTrait` : '',
+      indexedPrefix ? `${indexedPrefix}_rolltrait` : '',
+      indexedPrefix ? `${indexedPrefix}_roll_trait` : '',
+      indexedPrefix ? `${indexedPrefix}_trait` : '',
+      indexedPrefix ? `${indexedPrefix}_output` : '',
     ].filter(Boolean);
 
     for (const abilityName of abilityCandidates) {
@@ -756,6 +982,22 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       const cmd = buildCustomSheetActionCommand(abilityName);
       if (!cmd) continue;
       sendCommand(cmd);
+      return true;
+    }
+
+    // Some legacy DD5e sheets expose trait roll actions that work via `%{char|repeating_traits_<id>_output}`
+    // even when the action name is not listed in `char.abilities.models`.
+    for (const abilityName of abilityCandidates) {
+      const normalized = String(abilityName || '').toLowerCase();
+      if (!normalized) continue;
+      if (
+        !normalized.endsWith('_output') &&
+        !normalized.endsWith('_roll_output') &&
+        !normalized.includes('_rolltrait')
+      ) {
+        continue;
+      }
+      sendCommand(`%{${char.get('name')}|${abilityName}}`);
       return true;
     }
 
@@ -2521,7 +2763,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       ]);
       const key = `trait:${row.rowId}`;
       const rollFieldKey =
-        pickRowFieldKey(row.fields, ['rollTrait', 'rolltrait', 'roll_trait', 'trait']) ||
+        pickRowFieldKey(row.fields, ['rollTrait', 'rolltrait', 'roll_trait', 'trait', 'output', 'roll_output']) ||
         'rollTrait';
       const rollAttr = `repeating_traits_${row.rowId}_${rollFieldKey}`;
 
@@ -2597,11 +2839,11 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         return `
           <div class="tm-fold-block ${sourceClass}">
             <button
-              class="tm-fold-toggle ${sourceClass} ${isOpen ? 'is-open' : 'is-closed'}"
+              class="tm-fold-toggle tm-trait-source-toggle ${sourceClass} ${isOpen ? 'is-open' : 'is-closed'}"
               data-trait-source="${escapeHtml(group.source)}"
               aria-expanded="${isOpen ? 'true' : 'false'}"
               data-label="Source : ${escapeHtml(group.source)}">
-              <span class="tm-fold-title">${escapeHtml(group.source)}</span>
+              <span class="tm-fold-title tm-trait-source-title">${escapeHtml(group.source)}</span>
               <span class="tm-fold-chevron" aria-hidden="true">${marker}</span>
             </button>
             ${itemsHtml}
@@ -2620,6 +2862,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         <button
           class="tm-detail-chat"
           data-trait-rowid="${escapeHtml(selected.rowId)}"
+          data-trait-name="${escapeHtml(selected.name)}"
           data-trait-rollattr="${escapeHtml(selected.rollAttr || '')}"
           data-label="Envoyer ${escapeHtml(selected.name)} dans le chat">
           Envoyer au chat
@@ -2924,11 +3167,18 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       `spell_slots_l${l}_remain`,
       `spell_slots_l${l}_rest`,
       `spell_slots_l${l}_left`,
+      `spell_slots_l${l}_expended`,
+      `spell_slots_l${l}_spent`,
       `lvl${l}_slots_remaining`,
       `level${l}_slots_remaining`,
       `l${l}_slots_remaining`,
+      `lvl${l}_slots_expended`,
+      `level${l}_slots_expended`,
+      `l${l}_slots_expended`,
       `spellslots_l${l}_remaining`,
       `spellslots_lvl${l}_remaining`,
+      `spellslots_l${l}_expended`,
+      `spellslots_lvl${l}_expended`,
       // On some sheets, "current" stores remaining slots, not expended.
       `spell_slots_l${l}_current`,
       `spell_slots_lvl${l}_current`,
@@ -2941,11 +3191,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     ];
     const usedCandidates = [
       `spell_slots_l${l}_used`,
-      `spell_slots_l${l}_expended`,
-      `spell_slots_l${l}_spent`,
-      `lvl${l}_slots_expended`,
-      `level${l}_slots_expended`,
-      `l${l}_slots_expended`,
       `spellslots_l${l}_used`,
       `spellslots_lvl${l}_used`,
     ];
@@ -2963,12 +3208,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     let maxAttr = findSpellSlotAttrByCandidates(char, maxCandidates, { preferPositive: true, preferLargestPositive: true });
     let remainingAttr = findSpellSlotAttrByCandidates(char, remainingCandidates, { preferPositive: true, preferLargestPositive: true });
     let usedAttr = findSpellSlotAttrByCandidates(char, usedCandidates, { preferPositive: true });
-    if (!usedAttr) {
-      const currentAsUsed = findSpellSlotAttrByCandidates(char, currentCandidates, { preferPositive: true });
-      if (currentAsUsed && currentAsUsed !== remainingAttr) usedAttr = currentAsUsed;
-    }
 
-    if (!maxAttr || (!remainingAttr && !usedAttr)) {
+    if (!maxAttr || !remainingAttr || !usedAttr) {
       const allAttrNames = (char.attribs?.models || [])
         .map((attr) => String(attr.get('name') || '').trim())
         .filter(Boolean);
@@ -2991,19 +3232,27 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       }
       if (!remainingAttr) {
         remainingAttr =
-          pickFromPool(/(remaining|remain|left|restant|restants)/i, { preferPositive: true, preferLargestPositive: true }) ||
+          pickFromPool(/(remaining|remain|left|restant|restants|expended|spent)/i, { preferPositive: true, preferLargestPositive: true }) ||
           pickFromPool(/(current|courant)/i, { preferPositive: true, preferLargestPositive: true }) ||
           remainingAttr;
       }
       if (!usedAttr) {
         usedAttr =
-          pickFromPool(/(used|expended|spent|consume|utilis|depens)/i, { preferPositive: true }) ||
+          pickFromPool(/(used|consume|utilis|depens)/i, { preferPositive: true }) ||
           usedAttr;
-        if (!usedAttr) {
-          const currentFromPool = pickFromPool(/(current|courant)/i, { preferPositive: true });
-          if (currentFromPool && currentFromPool !== remainingAttr) usedAttr = currentFromPool;
-        }
       }
+    }
+
+    // `current` is ambiguous across sheets; prefer interpreting it as remaining slots.
+    if (!remainingAttr) {
+      remainingAttr = findSpellSlotAttrByCandidates(char, currentCandidates, {
+        preferPositive: true,
+        preferLargestPositive: true,
+      });
+    }
+
+    if (usedAttr && remainingAttr && usedAttr === remainingAttr) {
+      usedAttr = '';
     }
 
     return { maxAttr: maxAttr || '', remainingAttr: remainingAttr || '', usedAttr: usedAttr || '' };
@@ -3022,10 +3271,21 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const maxParsed = parseIntSafe(maxRaw, NaN);
     const remainingParsed = parseIntSafe(remainingRaw, NaN);
     const usedParsed = parseIntSafe(usedRaw, NaN);
+    const remainingName = String(attrs.remainingAttr || '').toLowerCase();
+    const usedName = String(attrs.usedAttr || '').toLowerCase();
+    const remainingLooksExplicit = /(remaining|remain|left|restant|restants|current|courant|expended|spent)/i.test(remainingName);
+    const usedLooksExplicit = /(used|consume|utilis|depens)/i.test(usedName);
+    const usedLooksCurrentOnly = /(current|courant)/i.test(usedName) && !usedLooksExplicit;
 
     let max = Number.isFinite(maxParsed) ? Math.max(0, maxParsed) : NaN;
     let remaining = Number.isFinite(remainingParsed) ? Math.max(0, remainingParsed) : NaN;
     let used = Number.isFinite(usedParsed) ? Math.max(0, usedParsed) : NaN;
+
+    // On some legacy sheets, the only exposed counter is `..._current` and it means remaining slots.
+    if (!attrs.remainingAttr && attrs.usedAttr && usedLooksCurrentOnly && Number.isFinite(used)) {
+      remaining = used;
+      used = Number.isFinite(max) ? Math.max(0, max - remaining) : 0;
+    }
 
     if (!Number.isFinite(remaining) && Number.isFinite(max) && Number.isFinite(used)) {
       remaining = Math.max(0, max - used);
@@ -3053,14 +3313,12 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       remaining = max;
       used = 0;
     } else if (max > 0 && remaining + used !== max) {
-      const remainingName = String(attrs.remainingAttr || '').toLowerCase();
-      const usedName = String(attrs.usedAttr || '').toLowerCase();
-      const remainingLooksExplicit = /(remaining|remain|left|restant|restants)/i.test(remainingName);
-      const usedLooksExplicit = /(used|expended|spent|consume|utilis|depens|current|courant)/i.test(usedName);
-
       if (usedLooksExplicit && !remainingLooksExplicit) {
         remaining = Math.max(0, max - used);
       } else if (remainingLooksExplicit && !usedLooksExplicit) {
+        used = Math.max(0, max - remaining);
+      } else if (usedLooksCurrentOnly) {
+        remaining = Math.max(0, Math.min(max, used));
         used = Math.max(0, max - remaining);
       } else if (remaining === used) {
         // When both attrs mirror the same counter, prefer displaying remaining slots.
@@ -3105,8 +3363,18 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         setCharAttrValue(char, slots.usedAttr, String(nextUsed));
       }
     } else if (slots.usedAttr) {
-      const nextUsed = slots.max > 0 ? Math.min(slots.max, slots.used + 1) : slots.used + 1;
-      setCharAttrValue(char, slots.usedAttr, String(nextUsed));
+      const usedName = String(slots.usedAttr || '').toLowerCase();
+      const usedLooksExplicit = /(used|consume|utilis|depens)/i.test(usedName);
+      const usedLooksCurrentOnly = /(current|courant)/i.test(usedName) && !usedLooksExplicit;
+      if (usedLooksCurrentOnly) {
+        const currentValueRaw = getAttrCurrentValue(char, slots.usedAttr);
+        const currentValue = parseIntSafe(currentValueRaw, slots.remaining);
+        const nextRemaining = Math.max(0, currentValue - 1);
+        setCharAttrValue(char, slots.usedAttr, String(nextRemaining));
+      } else {
+        const nextUsed = slots.max > 0 ? Math.min(slots.max, slots.used + 1) : slots.used + 1;
+        setCharAttrValue(char, slots.usedAttr, String(nextUsed));
+      }
     }
 
     if (currentSection === 'spells' && currentPopup) {
@@ -3165,7 +3433,20 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     });
   }
 
-  function triggerSpellRollFromSheet(section, rowId, rollAttrName = '') {
+  function spellLooksLikeRollPayload(value) {
+    const v = String(value || '').trim();
+    if (!v) return false;
+    return (
+      v.includes('&{template:') ||
+      v.includes('/roll') ||
+      v.includes('/r ') ||
+      v.includes('[[') ||
+      v.includes('%{') ||
+      v.includes('@{')
+    );
+  }
+
+  function triggerSpellOutputFromSheet(section, rowId, spellName = '') {
     const sec = String(section || '').trim();
     const rid = String(rowId || '').trim();
     if (!sec || !rid) return false;
@@ -3173,18 +3454,98 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const char = getSelectedChar();
     if (!char) return false;
 
-    const looksLikeRollPayload = (value) => {
-      const v = String(value || '').trim();
-      if (!v) return false;
-      return (
-        v.includes('&{template:') ||
-        v.includes('/roll') ||
-        v.includes('/r ') ||
-        v.includes('[[') ||
-        v.includes('%{') ||
-        v.includes('@{')
-      );
-    };
+    const escSec = escapeAttrSelectorValue(sec);
+    const escRid = escapeAttrSelectorValue(rid);
+    const rowEl = getRepeatingRowElementFromDom(sec, rid, spellName);
+
+    if (rowEl instanceof Element) {
+      const outputBtn =
+        rowEl.querySelector('button[name="roll_output"][type="roll"]') ||
+        rowEl.querySelector('button[name$="_output"][type="roll"]') ||
+        rowEl.querySelector('button[name*="output"][type="roll"]');
+      if (outputBtn instanceof HTMLElement) {
+        outputBtn.click();
+        return true;
+      }
+    }
+
+    const rows = getRepeatingSectionRows(char, sec);
+    const rowIndex = rows.findIndex((row) => String(row?.rowId || '').trim() === rid);
+    const indexedPrefix = rowIndex >= 0 ? `${sec}_$${rowIndex}` : '';
+
+    const buttonSelectors = [
+      `button[name="roll_${escSec}_${escRid}_output"]`,
+      `button[name="roll_${escSec}_${escRid}_roll_output"]`,
+      rowIndex >= 0 ? `button[name="roll_${escSec}_$${rowIndex}_output"]` : '',
+      rowIndex >= 0 ? `button[name="roll_${escSec}_$${rowIndex}_roll_output"]` : '',
+      `[data-reprowid="${escRid}"] button[name="roll_output"][type="roll"]`,
+      `[data-itemid="${escRid}"] button[name="roll_output"][type="roll"]`,
+      `.repitem[data-reprowid="${escRid}"] button[name="roll_output"][type="roll"]`,
+      `.repitem[data-itemid="${escRid}"] button[name="roll_output"][type="roll"]`,
+      `button[name*="roll_${escSec}_${escRid}"][name*="output"]`,
+      `button[name^="roll_repeating_spell-"][name*="${escRid}"][name*="output"]`,
+    ].filter(Boolean);
+
+    for (const selector of buttonSelectors) {
+      const btn = document.querySelector(selector);
+      if (!(btn instanceof HTMLElement)) continue;
+      btn.click();
+      return true;
+    }
+
+    const attrCandidates = [
+      `${sec}_${rid}_output`,
+      `${sec}_${rid}_roll_output`,
+      indexedPrefix ? `${indexedPrefix}_output` : '',
+      indexedPrefix ? `${indexedPrefix}_roll_output` : '',
+    ].filter(Boolean);
+
+    for (const attrName of attrCandidates) {
+      const model = getCharAttrModel(char, attrName);
+      if (!model) continue;
+      const raw = String(model.get('current') || '').trim();
+      if (!raw) continue;
+      // Do not send raw spell templates directly: they often contain local @{spell...} refs.
+      // Route through character context like capabilities/traits.
+      sendCommand(`@{${char.get('name')}|${attrName}}`);
+      return true;
+    }
+
+    const abilityCandidates = [
+      `${sec}_${rid}_output`,
+      `${sec}_${rid}_roll_output`,
+      indexedPrefix ? `${indexedPrefix}_output` : '',
+      indexedPrefix ? `${indexedPrefix}_roll_output` : '',
+    ].filter(Boolean);
+    const abilityNames = new Set(
+      (char?.abilities?.models || [])
+        .map((model) => String(model?.get?.('name') || '').trim())
+        .filter(Boolean)
+    );
+
+    for (const ability of abilityCandidates) {
+      if (!abilityNames.has(ability)) continue;
+      const cmd = buildCustomSheetActionCommand(ability);
+      if (!cmd) continue;
+      sendCommand(cmd);
+      return true;
+    }
+
+    for (const ability of abilityCandidates) {
+      sendCommand(`%{${char.get('name')}|${ability}}`);
+      return true;
+    }
+
+    return false;
+  }
+
+  function triggerSpellRollFromSheet(section, rowId, rollAttrName = '') {
+    const sec = String(section || '').trim();
+    const rid = String(rowId || '').trim();
+    if (!sec || !rid) return false;
+
+    const char = getSelectedChar();
+    if (!char) return false;
 
     const preferredAttr = String(rollAttrName || '').trim();
     const attrCandidates = [
@@ -3237,7 +3598,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       const model = getCharAttrModel(char, attrName);
       if (!model) continue;
       const raw = String(model.get('current') || '').trim();
-      if (!looksLikeRollPayload(raw)) continue;
+      if (!spellLooksLikeRollPayload(raw)) continue;
       sendCommand(raw);
       return true;
     }
@@ -3567,7 +3928,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
           'spell';
         const rollAttr = `${section}_${row.rowId}_${rollField}`;
         const preparedState = getSpellPreparedState(char, section, row.rowId, spellFields);
-        const memorized = preparedState.memorized;
+        // Cantrips (Niv 0 / Tours de magie) are always considered memorized.
+        const memorized = level === 0 ? true : preparedState.memorized;
         if (memorized) hasMemorized = true;
 
         byLevel.get(level).push({
@@ -3684,6 +4046,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
                         type="checkbox"
                         data-spell-mem-rowid="${escapeHtml(spell.rowId)}"
                         data-spell-mem-attr="${escapeHtml(spell.preparedAttr || '')}"
+                        ${spell.level === 0 ? 'data-spell-cantrip="1" disabled' : ''}
                         ${spell.memorized ? 'checked' : ''}>
                       <button
                         class="tm-list-item tm-spell-item ${activeClass} ${spell.memorized ? 'is-memorized' : 'is-unmemorized'}"
@@ -3772,6 +4135,18 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         </div>
       `
       : '';
+    const detailAction = selected
+      ? `
+        <button
+          class="tm-detail-chat"
+          data-spell-output-rowid="${escapeHtml(selected.rowId)}"
+          data-spell-output-section="${escapeHtml(selected.section)}"
+          data-spell-output-name="${escapeHtml(selected.name)}"
+          data-label="Envoyer ${escapeHtml(selected.name)} dans le chat">
+          Envoyer au chat
+        </button>
+      `
+      : '';
     const detailBody = selected ? asMultilineHtml(selected.description) : '<span class="tm-detail-empty">Aucun sort.</span>';
 
     return `
@@ -3787,6 +4162,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
               <div class="tm-detail-title">${detailTitle}</div>
               ${detailBadges}
             </div>
+            ${detailAction}
             ${detailMeta}
             <div class="tm-detail-body">${detailBody}</div>
           </div>
@@ -3987,7 +4363,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       align-self:flex-end;
     }
 
-    .toggle{
+    #tm-root .toggle{
       position:relative;
       display:flex;align-items:center;gap:6px;
       width:var(--tm-main-toggle-width);
@@ -4003,13 +4379,13 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       padding:0;
     }
 
-    .toggle.icon-only{
+    #tm-root .toggle.icon-only{
       width:var(--tm-cell-size);
       min-width:var(--tm-cell-size);
       padding:0;
     }
 
-    .settings{
+    #tm-root .settings{
       width:var(--tm-cell-size);
       height:var(--tm-cell-size);
       min-width:var(--tm-cell-size);
@@ -4138,7 +4514,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       width:var(--tm-accordion-wide-width);
     }
 
-    .tm-popup.is-wide .combat-action{
+    #tm-root .tm-popup.is-wide .combat-action{
       width:var(--tm-accordion-wide-width);
     }
 
@@ -4160,7 +4536,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       width:var(--tm-accordion-xwide-width);
     }
 
-    .tm-popup.is-xwide .combat-action{
+    #tm-root .tm-popup.is-xwide .combat-action{
       width:var(--tm-accordion-xwide-width);
     }
 
@@ -4355,13 +4731,65 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       font-weight:700;
     }
 
+    .tm-char-search{
+      display:flex;
+      align-items:center;
+      gap:4px;
+    }
+
+    .tm-char-search-input{
+      flex:1 1 auto;
+      min-width:0;
+      height:24px;
+      border:1px solid rgba(120,193,255,0.65);
+      border-radius:6px;
+      background:#000;
+      color:#fff;
+      padding:0 7px;
+      box-sizing:border-box;
+      font-size:11px;
+      outline:none;
+    }
+
+    .tm-char-search-input::placeholder{
+      color:#8ea6bf;
+    }
+
+    .tm-char-search-input:focus{
+      border-color:rgba(120,193,255,0.95);
+      box-shadow:0 0 0 1px rgba(120,193,255,0.35);
+    }
+
+    .tm-char-search-clear{
+      width:24px;
+      height:24px;
+      min-width:24px;
+      min-height:24px;
+      border-radius:6px;
+      border-color:rgba(120,193,255,0.75);
+      color:#b9ddff;
+      font-size:12px;
+      font-weight:700;
+      line-height:1;
+      padding:0;
+    }
+
+    .tm-char-search-meta{
+      color:#9bb0c5;
+      font-size:10px;
+      line-height:1.2;
+      text-align:right;
+      padding:0 1px;
+    }
+
     .tm-char-list{
       display:flex;
       flex-direction:column;
       gap:3px;
       max-height:240px;
       overflow:auto;
-      padding-right:2px;
+      padding:2px 3px 2px 2px;
+      box-sizing:border-box;
     }
 
     .tm-char-item{
@@ -4371,6 +4799,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       gap:6px;
       border-color:rgba(120,193,255,0.65);
       color:#e9f6ff;
+      padding:0 10px 0 9px;
+      box-sizing:border-box;
     }
 
     .tm-char-item.is-active{
@@ -4430,6 +4860,33 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       line-height:1.25;
     }
 
+    .tm-char-mj-toggle{
+      display:flex;
+      align-items:center;
+      gap:6px;
+      margin-top:2px;
+      padding:3px 5px;
+      border:1px solid rgba(120,193,255,0.55);
+      border-radius:6px;
+      background:rgba(29,57,92,0.26);
+      color:#cfe4ff;
+      font-size:10px;
+      line-height:1.2;
+      user-select:none;
+    }
+
+    .tm-char-mj-toggle input{
+      width:13px;
+      height:13px;
+      margin:0;
+      flex:0 0 auto;
+    }
+
+    .tm-char-mj-toggle span{
+      flex:1 1 auto;
+      min-width:0;
+    }
+
     .tm-equip-static-toggle{
       cursor:default;
       opacity:0.9;
@@ -4449,25 +4906,39 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       padding-right:2px;
     }
 
-    .tm-fold-toggle.tm-trait-classe,
-    .tm-list-item.tm-trait-classe{ border-color:rgba(74,201,126,0.85); }
-    .tm-list-item.tm-trait-classe.is-active{ background:rgba(36,122,72,0.42); outline-color:rgba(98,232,159,0.85); }
+    #tm-root .tm-fold-toggle.tm-trait-source-toggle{
+      justify-content:space-between;
+    }
 
-    .tm-fold-toggle.tm-trait-racial,
-    .tm-list-item.tm-trait-racial{ border-color:rgba(88,171,255,0.85); }
-    .tm-list-item.tm-trait-racial.is-active{ background:rgba(35,84,137,0.42); outline-color:rgba(120,193,255,0.85); }
+    #tm-root .tm-fold-title.tm-trait-source-title{
+      text-align:center;
+      text-transform:uppercase;
+      letter-spacing:0.35px;
+    }
 
-    .tm-fold-toggle.tm-trait-don,
-    .tm-list-item.tm-trait-don{ border-color:rgba(191,132,255,0.9); }
-    .tm-list-item.tm-trait-don.is-active{ background:rgba(99,51,147,0.4); outline-color:rgba(206,162,255,0.85); }
+    #tm-root .tm-fold-toggle.tm-trait-classe,
+    #tm-root .tm-list-item.tm-trait-classe{ border-color:rgba(74,201,126,0.85); }
+    #tm-root .tm-list-item.tm-trait-classe.is-active{ background:rgba(36,122,72,0.42); outline-color:rgba(98,232,159,0.85); }
 
-    .tm-fold-toggle.tm-trait-objet,
-    .tm-list-item.tm-trait-objet{ border-color:rgba(255,179,92,0.9); }
-    .tm-list-item.tm-trait-objet.is-active{ background:rgba(120,74,28,0.45); outline-color:rgba(255,201,136,0.85); }
+    #tm-root .tm-fold-toggle.tm-trait-racial,
+    #tm-root .tm-list-item.tm-trait-racial{ border-color:rgba(88,171,255,0.85); }
+    #tm-root .tm-list-item.tm-trait-racial.is-active{ background:rgba(35,84,137,0.42); outline-color:rgba(120,193,255,0.85); }
 
-    .tm-fold-toggle.tm-trait-autre,
-    .tm-list-item.tm-trait-autre{ border-color:rgba(185,185,185,0.8); }
-    .tm-list-item.tm-trait-autre.is-active{ background:rgba(86,86,86,0.42); outline-color:rgba(230,230,230,0.8); }
+    #tm-root .tm-fold-toggle.tm-trait-don,
+    #tm-root .tm-list-item.tm-trait-don{ border-color:rgba(191,132,255,0.9); }
+    #tm-root .tm-list-item.tm-trait-don.is-active{ background:rgba(99,51,147,0.4); outline-color:rgba(206,162,255,0.85); }
+
+    #tm-root .tm-fold-toggle.tm-trait-historique,
+    #tm-root .tm-list-item.tm-trait-historique{ border-color:rgba(255,214,120,0.9); }
+    #tm-root .tm-list-item.tm-trait-historique.is-active{ background:rgba(137,98,35,0.45); outline-color:rgba(255,224,154,0.85); }
+
+    #tm-root .tm-fold-toggle.tm-trait-objet,
+    #tm-root .tm-list-item.tm-trait-objet{ border-color:rgba(255,179,92,0.9); }
+    #tm-root .tm-list-item.tm-trait-objet.is-active{ background:rgba(120,74,28,0.45); outline-color:rgba(255,201,136,0.85); }
+
+    #tm-root .tm-fold-toggle.tm-trait-autre,
+    #tm-root .tm-list-item.tm-trait-autre{ border-color:rgba(185,185,185,0.8); }
+    #tm-root .tm-list-item.tm-trait-autre.is-active{ background:rgba(86,86,86,0.42); outline-color:rgba(230,230,230,0.8); }
 
     .tm-detail-panel{
       margin-top:2px;
@@ -4760,8 +5231,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       text-align:right;
     }
 
-    button{
-      width:40px;height:40px;
+    #tm-root button{
       background:#000;
       border:1px solid orange;
       border-radius:8px;
@@ -4771,8 +5241,22 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       box-sizing:border-box;
     }
 
-    img{width:36px;height:36px}
-    .txt{font-size:11px}
+    #tm-root .tm-core-btn{
+      width:40px;
+      height:40px;
+      min-width:40px;
+      min-height:40px;
+      padding:0;
+    }
+
+    #tm-root .toggle img,
+    #tm-root .tm-core-btn img{
+      width:36px;
+      height:36px;
+      display:block;
+    }
+
+    #tm-root .txt{font-size:11px}
     #tm-stats-grid .rest-btn{
       width:40px;
       height:40px;
@@ -4817,7 +5301,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       user-select:none;
     }
 
-    .combat-action{
+    #tm-root .combat-action{
       width:var(--tm-accordion-width);
       height:34px;
       justify-content:flex-start;
@@ -5099,6 +5583,16 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     currentPopup = popup;
     currentSection = sec;
+
+    if (sec === 'characters') {
+      requestAnimationFrame(() => {
+        const searchInput = popup.querySelector('input[data-char-filter]');
+        if (!searchInput) return;
+        searchInput.focus();
+        const len = searchInput.value.length;
+        searchInput.setSelectionRange(len, len);
+      });
+    }
   }
 
 /* ================= VISUAL ================= */
@@ -5188,6 +5682,13 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     stopHudDrag(e);
   });
 
+  window.addEventListener('mouseup', () => {
+    if (!MJ_MODE_ENABLED) return;
+    setTimeout(() => {
+      syncHudCharacterFromSelectedToken();
+    }, 0);
+  });
+
   window.addEventListener('pointercancel', (e) => {
     stopHudDrag(e);
   });
@@ -5199,13 +5700,27 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         return;
       }
 
+      if (btn.dataset.charFilterClear) {
+        CHARACTER_FILTER_QUERY = '';
+        localStorage.removeItem('tm_character_filter');
+        if (currentSection === 'characters' && currentPopup) {
+          currentPopup.innerHTML = buildCharacterPickerContent();
+          const searchInput = currentPopup.querySelector('input[data-char-filter]');
+          if (searchInput) searchInput.focus();
+        }
+        return;
+      }
+
       if (btn.dataset.charSelect) {
         selectHudCharacterById(btn.dataset.charSelect);
         return;
       }
 
       if (btn.dataset.hpTarget) {
-        const delta = parseIntSafe(btn.dataset.delta, 0);
+        let delta = parseIntSafe(btn.dataset.delta, 0);
+        if (btn.dataset.hpTarget === 'current' && e.shiftKey && delta !== 0) {
+          delta = delta > 0 ? 10 : -10;
+        }
         if (delta !== 0) adjustHpValue(btn.dataset.hpTarget, delta);
         return;
       }
@@ -5280,6 +5795,15 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         return;
       }
 
+      if (btn.dataset.spellOutputRowid) {
+        triggerSpellOutputFromSheet(
+          btn.dataset.spellOutputSection || '',
+          btn.dataset.spellOutputRowid || '',
+          btn.dataset.spellOutputName || ''
+        );
+        return;
+      }
+
       if (btn.dataset.spellItem) {
         SELECTED_SPELL_KEY = btn.dataset.spellItem;
         if (currentSection === 'spells' && currentPopup) {
@@ -5293,7 +5817,11 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       }
 
       if (btn.dataset.traitRowid) {
-        triggerTraitRollFromSheet(btn.dataset.traitRowid, btn.dataset.traitRollattr || '');
+        triggerTraitRollFromSheet(
+          btn.dataset.traitRowid,
+          btn.dataset.traitRollattr || '',
+          btn.dataset.traitName || ''
+        );
         return;
       }
 
@@ -5320,7 +5848,44 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     open(toggle.dataset.sec, toggle);
   });
 
+  root.addEventListener('input', (e) => {
+    const searchInput = e.target.closest('input[data-char-filter]');
+    if (!searchInput || !root.contains(searchInput)) return;
+
+    const caretStart = Number.isFinite(searchInput.selectionStart) ? searchInput.selectionStart : null;
+    const caretEnd = Number.isFinite(searchInput.selectionEnd) ? searchInput.selectionEnd : caretStart;
+    CHARACTER_FILTER_QUERY = String(searchInput.value || '');
+    if (CHARACTER_FILTER_QUERY) {
+      localStorage.setItem('tm_character_filter', CHARACTER_FILTER_QUERY);
+    } else {
+      localStorage.removeItem('tm_character_filter');
+    }
+
+    if (currentSection === 'characters' && currentPopup) {
+      currentPopup.innerHTML = buildCharacterPickerContent();
+      const nextInput = currentPopup.querySelector('input[data-char-filter]');
+      if (nextInput) {
+        nextInput.focus();
+        if (caretStart != null && caretEnd != null) {
+          const len = nextInput.value.length;
+          nextInput.setSelectionRange(Math.min(caretStart, len), Math.min(caretEnd, len));
+        }
+      }
+    }
+  });
+
   root.addEventListener('change', (e) => {
+    const mjModeInput = e.target.closest('input[type="checkbox"][data-char-mj-mode]');
+    if (mjModeInput && root.contains(mjModeInput)) {
+      setHudMjModeEnabled(mjModeInput.checked, { syncNow: true });
+      if (currentSection === 'characters' && currentPopup) {
+        currentPopup.innerHTML = buildCharacterPickerContent();
+        const searchInput = currentPopup.querySelector('input[data-char-filter]');
+        if (searchInput) searchInput.focus();
+      }
+      return;
+    }
+
     const spellMemInput = e.target.closest('input[type="checkbox"][data-spell-mem-rowid]');
     if (spellMemInput && root.contains(spellMemInput)) {
       setSpellMemorized(
@@ -5385,6 +5950,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
 /* ================= INIT ================= */
 
+  if (MJ_MODE_ENABLED) {
+    syncHudCharacterFromSelectedToken();
+  }
+
   prefetchAvailableCharacterAttributes();
   prefetchCharacterAttributes(getSelectedChar(), () => {
     refreshHudForCurrentCharacter(false);
@@ -5396,6 +5965,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   setRollMode(detectRollMode(), false);
   setTimeout(syncRollModeFromSheet, 1000);
   setInterval(() => {
+    const switchedByMjToken = syncHudCharacterFromSelectedToken();
+    if (switchedByMjToken) return;
     prefetchAvailableCharacterAttributes();
     updateCharacterSwitchButton();
     renderHpState();
