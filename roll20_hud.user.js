@@ -2622,13 +2622,134 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     return rows;
   }
 
+  function normalizeCombatAbilityText(raw) {
+    return String(raw || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[_{}@]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function detectCombatAbilityTierFromText(raw) {
+    const normalized = normalizeCombatAbilityText(raw);
+    if (!normalized) return '';
+
+    const parts = normalized.split(/[^a-z0-9]+/).filter(Boolean);
+    const has = (...tokens) => tokens.some((token) => parts.includes(token));
+
+    if (has('strength', 'force', 'str')) return 'str';
+    if (has('dexterity', 'dexterite', 'dex', 'dext')) return 'dex';
+    if (
+      has(
+        'wisdom',
+        'sagesse',
+        'wis',
+        'sag',
+        'intelligence',
+        'int',
+        'charisma',
+        'charisme',
+        'cha'
+      ) ||
+      normalized.includes('spellcasting ability') ||
+      has('spellcasting')
+    ) {
+      return 'mental';
+    }
+
+    return '';
+  }
+
+  function detectCombatAbilityTier(fields) {
+    const entries = Object.entries(fields || {});
+    if (!entries.length) return '';
+
+    const priorityValues = [];
+    const fallbackValues = [];
+
+    entries.forEach(([key, value]) => {
+      const raw = String(value || '').trim();
+      if (!raw) return;
+
+      const normalizedKey = normalizeCombatAbilityText(key).replace(/\s+/g, '');
+      if (!normalizedKey) return;
+
+      if (
+        normalizedKey === 'atkattrbase' ||
+        normalizedKey === 'atkattr' ||
+        normalizedKey === 'attackability' ||
+        normalizedKey === 'spellcastingability' ||
+        normalizedKey === 'ability' ||
+        normalizedKey === 'atkdmgattr' ||
+        normalizedKey === 'dmgattr'
+      ) {
+        priorityValues.push(raw);
+        return;
+      }
+
+      if (
+        normalizedKey.includes('atkattr') ||
+        normalizedKey.includes('attackability') ||
+        normalizedKey.includes('spellcasting') ||
+        normalizedKey.includes('ability') ||
+        normalizedKey.includes('dmgattr')
+      ) {
+        priorityValues.push(raw);
+        return;
+      }
+
+      if (
+        normalizedKey.includes('atk') ||
+        normalizedKey.includes('attack') ||
+        normalizedKey.includes('dmg') ||
+        normalizedKey.includes('roll')
+      ) {
+        fallbackValues.push(raw);
+      }
+    });
+
+    const scanValues =
+      priorityValues.length || fallbackValues.length
+        ? [...priorityValues, ...fallbackValues]
+        : entries
+            .map(([, value]) => String(value || '').trim())
+            .filter(Boolean);
+
+    for (const raw of scanValues) {
+      const tier = detectCombatAbilityTierFromText(raw);
+      if (tier) return tier;
+    }
+
+    return '';
+  }
+
+  function getCombatAbilityIcon(fields) {
+    const tier = detectCombatAbilityTier(fields);
+    if (tier === 'str') return '🗡️';
+    if (tier === 'dex') return '🎯';
+    if (tier === 'mental') return '💫';
+    return '';
+  }
+
+  function prefixCombatLabelWithIcon(label, icon) {
+    const text = String(label || '').trim();
+    if (!text || !icon) return text;
+
+    const knownPrefixes = ['🗡️', '🗡', '🎯', '💫'];
+    if (knownPrefixes.some((prefix) => text.startsWith(prefix))) return text;
+    return `${icon} ${text}`;
+  }
+
   function getRepeatingRows(char, section, nameField, actionField) {
     return getRepeatingSectionRows(char, section)
       .map((row) => {
         const label = String(row.fields[nameField] || '').trim();
         if (!label) return null;
+        const icon = getCombatAbilityIcon(row.fields);
         return {
-          label,
+          label: prefixCombatLabelWithIcon(label, icon),
           sheetAction: `${section}_${row.rowId}_${actionField}`,
         };
       })
