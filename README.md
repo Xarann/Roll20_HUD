@@ -46,6 +46,11 @@ This HUD puts key actions directly on the map to reduce clicks and speed up play
 ### Global modifiers
 ![Mods](screenshot7.png)
 
+### Equipement
+![Mods](screenshot8.png)
+
+### Spells
+![Mods](screenshot9.png)
 ---
 
 ## ✨ Features
@@ -164,6 +169,11 @@ Ce HUD place les actions clés directement sur la map pour réduire les clics et
 ### Modificateurs globaux
 ![Mods](screenshot7.png)
 
+### Equipement
+![Mods](screenshot8.png)
+
+### Sorts
+![Mods](screenshot9.png)
 ---
 
 ## ✨ Fonctionnalités
