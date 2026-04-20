@@ -23,6 +23,18 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   const HUD_AC_PREV_MOD_ATTR = 'tm_hud_ac_prev_mod';
   const TOOLTIP_OFFSET_Y = 24;
   const HUD_SHIFT_RIGHT_PERCENT = 15;
+  let HUD_DRAG_X = parseFloat(localStorage.getItem('tm_hud_drag_x') || '0');
+  let HUD_DRAG_Y = parseFloat(localStorage.getItem('tm_hud_drag_y') || '0');
+  if (!Number.isFinite(HUD_DRAG_X)) HUD_DRAG_X = 0;
+  if (!Number.isFinite(HUD_DRAG_Y)) HUD_DRAG_Y = 0;
+  const HUD_DRAG_STATE = {
+    active: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    originX: 0,
+    originY: 0,
+  };
   const TRAIT_SOURCE_OPEN = Object.create(null);
   const SPELL_LEVEL_OPEN = Object.create(null);
   let SELECTED_TRAIT_KEY = '';
@@ -2855,11 +2867,41 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     setCharAttrValue(char, getSpellMemAttrName(rowId), nextValue);
   }
 
-  function findSpellSlotAttrByCandidates(char, candidates) {
-    for (const name of candidates) {
-      if (getCharAttrModel(char, name)) return name;
+  function readSpellSlotAttrNumber(char, attrName) {
+    const model = getCharAttrModel(char, attrName);
+    if (!model) return NaN;
+    const parsed = parseIntSafe(model.get('current'), NaN);
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : NaN;
+  }
+
+  function findSpellSlotAttrByCandidates(char, candidates, options = null) {
+    const opts = { preferPositive: true, preferLargestPositive: false, ...(options || {}) };
+    const uniqueNames = Array.from(new Set((candidates || []).map((n) => String(n || '').trim()).filter(Boolean)));
+    if (!uniqueNames.length) return '';
+
+    const existing = uniqueNames
+      .filter((name) => Boolean(getCharAttrModel(char, name)))
+      .map((name) => ({ name, value: readSpellSlotAttrNumber(char, name) }));
+
+    if (!existing.length) return '';
+
+    if (opts.preferPositive) {
+      const positives = existing.filter((entry) => Number.isFinite(entry.value) && entry.value > 0);
+      if (positives.length) {
+        if (opts.preferLargestPositive) {
+          const best = positives.reduce((maxEntry, entry) =>
+            entry.value > maxEntry.value ? entry : maxEntry
+          );
+          return best.name;
+        }
+        return positives[0].name;
+      }
     }
-    return '';
+
+    const numeric = existing.find((entry) => Number.isFinite(entry.value) && entry.value >= 0);
+    if (numeric) return numeric.name;
+
+    return existing[0].name;
   }
 
   function detectSpellSlotAttrs(char, level) {
@@ -2887,6 +2929,15 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       `l${l}_slots_remaining`,
       `spellslots_l${l}_remaining`,
       `spellslots_lvl${l}_remaining`,
+      // On some sheets, "current" stores remaining slots, not expended.
+      `spell_slots_l${l}_current`,
+      `spell_slots_lvl${l}_current`,
+      `spell_slots_level${l}_current`,
+      `lvl${l}_slots_current`,
+      `level${l}_slots_current`,
+      `l${l}_slots_current`,
+      `spellslots_l${l}_current`,
+      `spellslots_lvl${l}_current`,
     ];
     const usedCandidates = [
       `spell_slots_l${l}_used`,
@@ -2898,10 +2949,24 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       `spellslots_l${l}_used`,
       `spellslots_lvl${l}_used`,
     ];
+    const currentCandidates = [
+      `spell_slots_l${l}_current`,
+      `spell_slots_lvl${l}_current`,
+      `spell_slots_level${l}_current`,
+      `lvl${l}_slots_current`,
+      `level${l}_slots_current`,
+      `l${l}_slots_current`,
+      `spellslots_l${l}_current`,
+      `spellslots_lvl${l}_current`,
+    ];
 
-    let maxAttr = findSpellSlotAttrByCandidates(char, maxCandidates);
-    let remainingAttr = findSpellSlotAttrByCandidates(char, remainingCandidates);
-    let usedAttr = findSpellSlotAttrByCandidates(char, usedCandidates);
+    let maxAttr = findSpellSlotAttrByCandidates(char, maxCandidates, { preferPositive: true, preferLargestPositive: true });
+    let remainingAttr = findSpellSlotAttrByCandidates(char, remainingCandidates, { preferPositive: true, preferLargestPositive: true });
+    let usedAttr = findSpellSlotAttrByCandidates(char, usedCandidates, { preferPositive: true });
+    if (!usedAttr) {
+      const currentAsUsed = findSpellSlotAttrByCandidates(char, currentCandidates, { preferPositive: true });
+      if (currentAsUsed && currentAsUsed !== remainingAttr) usedAttr = currentAsUsed;
+    }
 
     if (!maxAttr || (!remainingAttr && !usedAttr)) {
       const allAttrNames = (char.attribs?.models || [])
@@ -2911,22 +2976,33 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       const pool = allAttrNames.filter(
         (name) => /(slot|slots|spellslot|emplacement|emplacements)/i.test(name) && levelRegex.test(name)
       );
+      const pickFromPool = (pattern, options = null) =>
+        findSpellSlotAttrByCandidates(
+          char,
+          pool.filter((name) => pattern.test(name)),
+          options
+        );
 
       if (!maxAttr) {
         maxAttr =
-          pool.find((name) => /(total|max|maximum|totaux)/i.test(name)) ||
-          pool.find((name) => /spell_slots_l\d+$/i.test(name)) ||
+          pickFromPool(/(total|max|maximum|totaux)/i, { preferPositive: true, preferLargestPositive: true }) ||
+          pickFromPool(/spell_slots_l\d+$/i, { preferPositive: true, preferLargestPositive: true }) ||
           maxAttr;
       }
       if (!remainingAttr) {
         remainingAttr =
-          pool.find((name) => /(remaining|remain|left|restant|restants|current|courant)/i.test(name)) ||
+          pickFromPool(/(remaining|remain|left|restant|restants)/i, { preferPositive: true, preferLargestPositive: true }) ||
+          pickFromPool(/(current|courant)/i, { preferPositive: true, preferLargestPositive: true }) ||
           remainingAttr;
       }
       if (!usedAttr) {
         usedAttr =
-          pool.find((name) => /(used|expended|spent|consume|utilis|depens)/i.test(name)) ||
+          pickFromPool(/(used|expended|spent|consume|utilis|depens)/i, { preferPositive: true }) ||
           usedAttr;
+        if (!usedAttr) {
+          const currentFromPool = pickFromPool(/(current|courant)/i, { preferPositive: true });
+          if (currentFromPool && currentFromPool !== remainingAttr) usedAttr = currentFromPool;
+        }
       }
     }
 
@@ -2970,6 +3046,31 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     if (!Number.isFinite(remaining)) remaining = 0;
     if (!Number.isFinite(used)) used = Number.isFinite(max) ? Math.max(0, max - remaining) : 0;
     if (!Number.isFinite(max)) max = Math.max(remaining, used);
+
+    // Some sheets expose duplicate slot attrs where one stays at 0.
+    // Normalize obviously incoherent states to keep HUD aligned with sheet values.
+    if (max > 0 && remaining === 0 && used === 0) {
+      remaining = max;
+      used = 0;
+    } else if (max > 0 && remaining + used !== max) {
+      const remainingName = String(attrs.remainingAttr || '').toLowerCase();
+      const usedName = String(attrs.usedAttr || '').toLowerCase();
+      const remainingLooksExplicit = /(remaining|remain|left|restant|restants)/i.test(remainingName);
+      const usedLooksExplicit = /(used|expended|spent|consume|utilis|depens|current|courant)/i.test(usedName);
+
+      if (usedLooksExplicit && !remainingLooksExplicit) {
+        remaining = Math.max(0, max - used);
+      } else if (remainingLooksExplicit && !usedLooksExplicit) {
+        used = Math.max(0, max - remaining);
+      } else if (remaining === used) {
+        // When both attrs mirror the same counter, prefer displaying remaining slots.
+        remaining = Math.max(0, max - used);
+      } else if (remaining === 0 && used >= 0) {
+        remaining = Math.max(0, max - used);
+      } else if (used === 0 && remaining >= 0) {
+        used = Math.max(0, max - remaining);
+      }
+    }
 
     if (max > 0) {
       remaining = Math.min(max, remaining);
@@ -3836,7 +3937,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
   document.body.appendChild(root);
   const popupHost = root.querySelector('#tm-popup-zone');
-  root.style.transform = `translateX(calc(-50% + ${HUD_SHIFT_RIGHT_PERCENT}%)) scale(${SCALE})`;
+  applyHudTransform();
 
   const tooltip = document.createElement('div');
   tooltip.id = 'tm-tooltip';
@@ -4079,7 +4180,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     .tm-popup.tm-popup-settings{
       left:calc(-100% - var(--tm-cell-gap));
-      bottom:calc(100% + var(--tm-cell-gap));
+      bottom:0;
       transform:none;
     }
 
@@ -4698,6 +4799,24 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       padding:0;
     }
 
+    .tm-move-btn{
+      font-size:21px;
+      font-weight:700;
+      border-color:rgba(120,193,255,0.85);
+      color:#b9ddff;
+      cursor:grab;
+    }
+
+    .tm-move-btn:active{
+      cursor:grabbing;
+    }
+
+    #tm-root.tm-hud-dragging,
+    #tm-root.tm-hud-dragging *{
+      cursor:grabbing !important;
+      user-select:none;
+    }
+
     .combat-action{
       width:var(--tm-accordion-width);
       height:34px;
@@ -4861,6 +4980,21 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
 /* ================= POPUP ================= */
 
+  function buildSettingsContent() {
+    return `
+      <div class="tm-settings-col">
+        <div class="tm-cell"><button class="tm-scale-btn" data-scale="up" data-label="Augmenter la taille">+</button></div>
+        <div class="tm-cell"><button class="tm-scale-btn" data-scale="down" data-label="Réduire la taille">-</button></div>
+        <div class="tm-cell">
+          <button
+            class="tm-scale-btn tm-move-btn"
+            data-hud-drag-handle="1"
+            data-label="Maintenir et glisser pour déplacer le HUD">⌖</button>
+        </div>
+      </div>
+    `;
+  }
+
   function closePopup() {
     if (!currentPopup) return;
     currentPopup.remove();
@@ -4939,12 +5073,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     }
 
     if (sec === 'settings') {
-      content = `
-        <div class="tm-settings-col">
-          <div class="tm-cell"><button class="tm-scale-btn" data-scale="up" data-label="Augmenter la taille">+</button></div>
-          <div class="tm-cell"><button class="tm-scale-btn" data-scale="down" data-label="Réduire la taille">-</button></div>
-        </div>
-      `;
+      content = buildSettingsContent();
     }
 
     popup.innerHTML = content;
@@ -4974,10 +5103,60 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
 /* ================= VISUAL ================= */
 
+  function applyHudTransform() {
+    root.style.transform = `translate(calc(-50% + ${HUD_SHIFT_RIGHT_PERCENT}% + ${HUD_DRAG_X}px), ${HUD_DRAG_Y}px) scale(${SCALE})`;
+  }
+
+  function persistHudTransform() {
+    localStorage.setItem('tm_hud_scale', String(SCALE));
+    localStorage.setItem('tm_hud_drag_x', String(HUD_DRAG_X));
+    localStorage.setItem('tm_hud_drag_y', String(HUD_DRAG_Y));
+  }
+
   function updateScale(delta) {
     SCALE = Math.max(0.6, Math.min(1.6, SCALE + delta));
-    root.style.transform = `translateX(calc(-50% + ${HUD_SHIFT_RIGHT_PERCENT}%)) scale(${SCALE})`;
-    localStorage.setItem('tm_hud_scale', SCALE);
+    applyHudTransform();
+    persistHudTransform();
+  }
+
+  function startHudDrag(event, handle) {
+    if (!root || !handle) return;
+    if (event.button !== 0) return;
+
+    HUD_DRAG_STATE.active = true;
+    HUD_DRAG_STATE.pointerId = event.pointerId;
+    HUD_DRAG_STATE.startX = event.clientX;
+    HUD_DRAG_STATE.startY = event.clientY;
+    HUD_DRAG_STATE.originX = HUD_DRAG_X;
+    HUD_DRAG_STATE.originY = HUD_DRAG_Y;
+
+    root.classList.add('tm-hud-dragging');
+    if (typeof handle.setPointerCapture === 'function') {
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch (_error) {}
+    }
+  }
+
+  function moveHudDrag(event) {
+    if (!HUD_DRAG_STATE.active) return;
+    if (HUD_DRAG_STATE.pointerId !== event.pointerId) return;
+
+    const dx = event.clientX - HUD_DRAG_STATE.startX;
+    const dy = event.clientY - HUD_DRAG_STATE.startY;
+    HUD_DRAG_X = HUD_DRAG_STATE.originX + dx;
+    HUD_DRAG_Y = HUD_DRAG_STATE.originY + dy;
+    applyHudTransform();
+  }
+
+  function stopHudDrag(event = null) {
+    if (!HUD_DRAG_STATE.active) return;
+    if (event && HUD_DRAG_STATE.pointerId !== event.pointerId) return;
+
+    HUD_DRAG_STATE.active = false;
+    HUD_DRAG_STATE.pointerId = null;
+    root.classList.remove('tm-hud-dragging');
+    persistHudTransform();
   }
 
   function showTooltip(label, x, y) {
@@ -4993,9 +5172,33 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
 /* ================= EVENTS ================= */
 
+  root.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('button[data-hud-drag-handle]');
+    if (!handle || !root.contains(handle)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startHudDrag(e, handle);
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    moveHudDrag(e);
+  });
+
+  window.addEventListener('pointerup', (e) => {
+    stopHudDrag(e);
+  });
+
+  window.addEventListener('pointercancel', (e) => {
+    stopHudDrag(e);
+  });
+
   root.addEventListener('click', (e) => {
     const btn = e.target.closest('button');
     if (btn && root.contains(btn)) {
+      if (btn.dataset.hudDragHandle) {
+        return;
+      }
+
       if (btn.dataset.charSelect) {
         selectHudCharacterById(btn.dataset.charSelect);
         return;
