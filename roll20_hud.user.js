@@ -40,7 +40,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   let SELECTED_TRAIT_KEY = '';
   let SELECTED_SPELL_KEY = '';
   let SELECTED_EQUIPMENT_CATEGORY = '';
-  let MJ_MODE_ENABLED = localStorage.getItem('tm_hud_mj_mode') === '1';
+  let MJ_TOKEN_SYNC_TIMER = null;
+  let MJ_CANVAS_SYNC_BOUND = false;
   let CHARACTER_FILTER_QUERY = localStorage.getItem('tm_character_filter') || '';
   let SPELL_SHOW_ALL = localStorage.getItem('tm_spell_show_all') === '1';
   const PREFETCHED_CHAR_IDS = new Set();
@@ -224,7 +225,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   }
 
   function syncHudCharacterFromSelectedToken() {
-    if (!MJ_MODE_ENABLED || !isCurrentPlayerGm()) return false;
+    if (!isCurrentPlayerGm()) return false;
 
     const representedChar = getCharacterFromSelectedToken();
     if (!representedChar) return false;
@@ -238,13 +239,51 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     return selectHudCharacterById(representedId);
   }
 
-  function setHudMjModeEnabled(enabled, options = null) {
-    const opts = { syncNow: true, ...(options || {}) };
-    MJ_MODE_ENABLED = Boolean(enabled && isCurrentPlayerGm());
-    localStorage.setItem('tm_hud_mj_mode', MJ_MODE_ENABLED ? '1' : '0');
-    updateCharacterSwitchButton();
-    if (MJ_MODE_ENABLED && opts.syncNow) {
-      syncHudCharacterFromSelectedToken();
+  function scheduleMjTokenSync(delayMs = 0) {
+    if (!isCurrentPlayerGm()) return;
+
+    const delay = Math.max(0, parseIntSafe(delayMs, 0));
+    if (MJ_TOKEN_SYNC_TIMER) {
+      clearTimeout(MJ_TOKEN_SYNC_TIMER);
+      MJ_TOKEN_SYNC_TIMER = null;
+    }
+
+    MJ_TOKEN_SYNC_TIMER = setTimeout(() => {
+      MJ_TOKEN_SYNC_TIMER = null;
+      const switched = syncHudCharacterFromSelectedToken();
+
+      if (!switched && currentSection === 'characters' && currentPopup) {
+        currentPopup.innerHTML = buildCharacterPickerContent();
+      }
+    }, delay);
+  }
+
+  function bindMjCanvasSelectionSync() {
+    if (MJ_CANVAS_SYNC_BOUND) return;
+
+    const canvas = window.d20?.engine?.canvas;
+    if (!canvas || typeof canvas.on !== 'function') return;
+
+    const eventNames = [
+      'selection:created',
+      'selection:updated',
+      'selection:cleared',
+      'object:selected',
+      'object:deselected',
+    ];
+
+    let boundAny = false;
+    eventNames.forEach((eventName) => {
+      try {
+        canvas.on(eventName, () => {
+          scheduleMjTokenSync(0);
+        });
+        boundAny = true;
+      } catch (_error) {}
+    });
+
+    if (boundAny) {
+      MJ_CANVAS_SYNC_BOUND = true;
     }
   }
 
@@ -305,26 +344,45 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
   function updateCharacterSwitchButton() {
     if (!root) return;
+    const isMjMode = isCurrentPlayerGm();
+    root.classList.toggle('tm-mode-mj', isMjMode);
 
-    if (MJ_MODE_ENABLED && !isCurrentPlayerGm()) {
-      MJ_MODE_ENABLED = false;
-      localStorage.setItem('tm_hud_mj_mode', '0');
-    }
+    const setToggleDisabledState = (toggleEl, disabled) => {
+      if (!toggleEl) return;
+      toggleEl.classList.toggle('is-disabled', Boolean(disabled));
+      toggleEl.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      if (disabled) {
+        toggleEl.dataset.toggleDisabled = '1';
+      } else {
+        delete toggleEl.dataset.toggleDisabled;
+      }
+    };
 
     const toggle = root.querySelector('.toggle[data-sec="characters"]');
+    const currencyToggle = root.querySelector('.toggle[data-sec="currency"]');
+    setToggleDisabledState(toggle, isMjMode);
+    setToggleDisabledState(currencyToggle, isMjMode);
     if (!toggle) return;
+
+    const roleBadge = toggle.querySelector('[data-char-mode-badge]');
+    if (roleBadge) {
+      roleBadge.textContent = isMjMode ? 'MJ' : 'PJ';
+    }
+
+    if (isMjMode && currentPopup && (currentSection === 'characters' || currentSection === 'currency')) {
+      closePopup();
+    }
 
     const chars = getAvailableCharacters();
     const current = getSelectedChar();
     const name = getCharacterDisplayName(current);
     const typeInfo = getCharacterSheetTypeUi(current);
     const count = chars.length;
-    const modeHint = isCurrentPlayerGm() && MJ_MODE_ENABLED ? ' | Mode MJ' : '';
 
     const tooltip =
       count > 1
-        ? `Fiche active : ${name} [${typeInfo.label}]${modeHint} (${count} fiches, clic pour choisir)`
-        : `Fiche active : ${name} [${typeInfo.label}]${modeHint}`;
+        ? `Fiche active : ${name} [${typeInfo.label}] (${count} fiches, clic pour choisir)`
+        : `Fiche active : ${name} [${typeInfo.label}]`;
     toggle.dataset.label = tooltip;
     toggle.setAttribute('aria-label', tooltip);
   }
@@ -409,7 +467,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const activeId = getCharacterId(active);
     const activeName = getCharacterDisplayName(active);
     const activeType = getCharacterSheetTypeUi(active);
-    const isGm = isCurrentPlayerGm();
     const queryRaw = String(CHARACTER_FILTER_QUERY || '').trimStart();
     const queryToken = normalizeSheetTypeToken(queryRaw);
 
@@ -457,15 +514,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       `
       : '';
 
-    const mjModeBlock = isGm
-      ? `
-        <label class="tm-char-mj-toggle" data-label="Mode MJ: suit la fiche du token sélectionné">
-          <input type="checkbox" data-char-mj-mode="1" ${MJ_MODE_ENABLED ? 'checked' : ''}>
-          <span>Mode MJ (suivre token sélectionné)</span>
-        </label>
-      `
-      : '';
-
     return `
       <div class="tm-hud-wrap tm-char-picker-wrap">
         <div class="tm-char-active">
@@ -487,7 +535,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         </div>
         <div class="tm-char-search-meta">${filteredChars.length}/${chars.length} fiches</div>
         <div class="tm-char-list">${list}</div>
-        ${mjModeBlock}
       </div>
     `;
   }
@@ -2271,17 +2318,142 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     }, 120);
   }
 
+  function getSheetDocuments() {
+    const docs = [];
+    const seen = new Set();
+    const queue = [document];
+
+    while (queue.length) {
+      const doc = queue.shift();
+      if (!doc || seen.has(doc)) continue;
+      seen.add(doc);
+      docs.push(doc);
+
+      let iframes = [];
+      try {
+        iframes = Array.from(doc.querySelectorAll('iframe'));
+      } catch (_error) {
+        iframes = [];
+      }
+
+      iframes.forEach((frame) => {
+        try {
+          const childDoc = frame.contentDocument || frame.contentWindow?.document;
+          if (!childDoc || seen.has(childDoc)) return;
+          queue.push(childDoc);
+        } catch (_error) {}
+      });
+    }
+
+    return docs;
+  }
+
+  function queryAllSheetDocuments(selector) {
+    const results = [];
+    const seen = new Set();
+
+    getSheetDocuments().forEach((doc) => {
+      let nodes = [];
+      try {
+        nodes = Array.from(doc.querySelectorAll(selector));
+      } catch (_error) {
+        nodes = [];
+      }
+
+      nodes.forEach((node) => {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        results.push(node);
+      });
+    });
+
+    return results;
+  }
+
+  function isInputNode(node) {
+    return Boolean(node && String(node.tagName || '').toUpperCase() === 'INPUT');
+  }
+
+  function isFormControlNode(node) {
+    if (!node) return false;
+    const tag = String(node.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  }
+
+  function rankSheetInputNode(node) {
+    if (!node) return 0;
+    let score = 0;
+
+    if (typeof node.closest === 'function') {
+      if (node.closest('.display')) score += 10;
+      if (node.closest('.options')) score -= 2;
+    }
+
+    try {
+      const style = node.ownerDocument?.defaultView?.getComputedStyle?.(node);
+      if (style) {
+        if (style.display !== 'none' && style.visibility !== 'hidden') score += 2;
+        if (style.opacity === '0') score -= 1;
+      }
+    } catch (_error) {}
+
+    if (typeof node.getBoundingClientRect === 'function') {
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) score += 1;
+    }
+
+    return score;
+  }
+
+  function dispatchControlEvent(control, type) {
+    if (!control || !type) return;
+    const view = control.ownerDocument?.defaultView || window;
+    const EventCtor = view?.Event || Event;
+    control.dispatchEvent(new EventCtor(type, { bubbles: true }));
+  }
+
+  function invokeSheetFunction(functionName, ...args) {
+    const fnName = String(functionName || '').trim();
+    if (!fnName) return false;
+
+    const contexts = [];
+    const seen = new Set();
+    const pushContext = (ctx) => {
+      if (!ctx || seen.has(ctx)) return;
+      seen.add(ctx);
+      contexts.push(ctx);
+    };
+
+    pushContext(window);
+    getSheetDocuments().forEach((doc) => pushContext(doc?.defaultView || null));
+
+    let called = false;
+    contexts.forEach((ctx) => {
+      const fn = ctx?.[fnName];
+      if (typeof fn !== 'function') return;
+      try {
+        fn(...args);
+        called = true;
+      } catch (_error) {}
+    });
+
+    return called;
+  }
+
   function setSheetCheckboxByAttrName(attrName, checked) {
     if (!attrName) return false;
 
-    const inputs = Array.from(document.querySelectorAll(`[name="attr_${attrName}"]`));
+    const inputs = queryAllSheetDocuments(`[name="attr_${attrName}"]`).sort(
+      (a, b) => rankSheetInputNode(b) - rankSheetInputNode(a)
+    );
     if (!inputs.length) return false;
 
     let changed = false;
 
     inputs.forEach((input) => {
-      if (!(input instanceof HTMLInputElement)) return;
-      if (input.type !== 'checkbox' && input.type !== 'radio') return;
+      if (!isInputNode(input)) return;
+      const type = String(input.type || '').toLowerCase();
+      if (type !== 'checkbox' && type !== 'radio') return;
       if (input.checked === checked) return;
       input.click();
       changed = true;
@@ -2292,19 +2464,19 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
   function setSheetInputValueByAttrName(attrName, value) {
     if (!attrName) return false;
-    const inputs = Array.from(document.querySelectorAll(`[name="attr_${attrName}"]`));
+    const inputs = queryAllSheetDocuments(`[name="attr_${attrName}"]`);
     if (!inputs.length) return false;
 
     const rawValue = String(value ?? '');
     let changed = false;
 
     inputs.forEach((input) => {
-      if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement || input instanceof HTMLSelectElement)) return;
+      if (!isFormControlNode(input)) return;
 
-      if (input instanceof HTMLInputElement && (input.type === 'checkbox' || input.type === 'radio')) {
+      if (isInputNode(input) && (input.type === 'checkbox' || input.type === 'radio')) {
         const shouldCheck = rawValue !== '0' && rawValue !== '' && rawValue !== 'false';
         if (input.checked !== shouldCheck) {
-          input.checked = shouldCheck;
+          input.click();
           changed = true;
         }
       } else if (input.value !== rawValue) {
@@ -2312,8 +2484,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         changed = true;
       }
 
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+      dispatchControlEvent(input, 'input');
+      dispatchControlEvent(input, 'change');
     });
 
     return changed;
@@ -2325,55 +2497,66 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const sectionShort = section.replace(/^repeating_/, '');
     const fullAttrName = `repeating_${sectionShort}_${rowId}_${field}`;
     const targetValue = checked ? '1' : '0';
+    const escRowId = escapeAttrSelectorValue(rowId);
     const rowSelectors = [
-      `fieldset.${section} .repitem[data-reprowid="${rowId}"]`,
-      `.repitem[data-reprowid="${rowId}"]`,
-      `[data-reprowid="${rowId}"]`,
-      `.repitem[data-itemid="${rowId}"]`,
-      `[data-itemid="${rowId}"]`,
+      `fieldset.${section} .repitem[data-reprowid="${escRowId}"]`,
+      `.repitem[data-reprowid="${escRowId}"]`,
+      `[data-reprowid="${escRowId}"]`,
+      `.repitem[data-itemid="${escRowId}"]`,
+      `[data-itemid="${escRowId}"]`,
     ];
     let changed = false;
 
+    const rowNodes = [];
+    const seenRows = new Set();
     rowSelectors.forEach((rowSelector) => {
-      const rows = Array.from(document.querySelectorAll(rowSelector));
-      rows.forEach((rowEl) => {
-        const inputs = Array.from(
-          rowEl.querySelectorAll(`input[name="attr_${field}"], input[name$="_${field}"]`)
-        );
-        inputs.forEach((input) => {
-          if (!(input instanceof HTMLInputElement)) return;
-          if (input.type === 'checkbox' || input.type === 'radio') {
-            if (input.checked !== checked) {
-              input.checked = checked;
-              changed = true;
-            }
-          }
-          if (input.type !== 'checkbox' && input.type !== 'radio' && input.value !== targetValue) {
-            input.value = targetValue;
-            changed = true;
-          }
+      queryAllSheetDocuments(rowSelector).forEach((rowEl) => {
+        if (!rowEl || seenRows.has(rowEl)) return;
+        seenRows.add(rowEl);
+        rowNodes.push(rowEl);
+      });
+    });
 
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        });
+    rowNodes.forEach((rowEl) => {
+      const inputs = Array.from(
+        rowEl.querySelectorAll(`input[name="attr_${field}"], input[name$="_${field}"]`)
+      ).sort((a, b) => rankSheetInputNode(b) - rankSheetInputNode(a));
+      let toggledCheckbox = false;
+      inputs.forEach((input) => {
+        if (!isInputNode(input)) return;
+        const type = String(input.type || '').toLowerCase();
+        if (type === 'checkbox' || type === 'radio') {
+          if (!toggledCheckbox && input.checked !== checked) {
+            input.click();
+            changed = true;
+            toggledCheckbox = true;
+          }
+        } else if (input.value !== targetValue) {
+          input.value = targetValue;
+          changed = true;
+        }
+
+        dispatchControlEvent(input, 'input');
+        dispatchControlEvent(input, 'change');
       });
     });
 
     // Fallback to explicit full attr name used by repeating rows in some DOM variants.
-    const inputs = Array.from(document.querySelectorAll(`[name="attr_${fullAttrName}"], [name="attr_${field}"]`));
-    inputs.forEach((input) => {
-      if (!(input instanceof HTMLInputElement)) return;
-      if (input.type === 'checkbox' || input.type === 'radio') {
+    const exactAttrInputs = queryAllSheetDocuments(`[name="attr_${fullAttrName}"]`);
+    exactAttrInputs.forEach((input) => {
+      if (!isInputNode(input)) return;
+      const type = String(input.type || '').toLowerCase();
+      if (type === 'checkbox' || type === 'radio') {
         if (input.checked === checked) return;
-        input.checked = checked;
+        input.click();
         changed = true;
       } else if (input.value !== targetValue) {
         input.value = targetValue;
         changed = true;
       }
 
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+      dispatchControlEvent(input, 'input');
+      dispatchControlEvent(input, 'change');
     });
 
     // Final safety: update hidden/non-checkbox versions of the same repeating attribute.
@@ -2448,24 +2631,13 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   }
 
   function triggerNativeRecalc(key = null) {
-    const call = (name, ...args) => {
-      const fn = window?.[name];
-      if (typeof fn !== 'function') return false;
-      try {
-        fn(...args);
-        return true;
-      } catch (err) {
-        return false;
-      }
-    };
-
     if (!key || key === 'damage') {
-      call('update_globaldamage');
-      call('update_attacks', 'all');
+      invokeSheetFunction('update_globaldamage');
+      invokeSheetFunction('update_attacks', 'all');
     }
 
     if (!key || key === 'ac') {
-      call('update_ac');
+      invokeSheetFunction('update_ac');
       setTimeout(syncArmorClassFromGlobalMods, 90);
     }
   }
@@ -3027,6 +3199,70 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const value = String(raw || '').trim();
     if (!value) return 'INVENTAIRE';
     return value.toUpperCase();
+  }
+
+  function parseEquipmentNumber(raw, fallback = 0) {
+    const text = String(raw ?? '').trim();
+    if (!text) return fallback;
+    const normalized = text
+      .replace(/\s+/g, '')
+      .replace(',', '.')
+      .replace(/[^0-9.+-]/g, '');
+    if (!normalized) return fallback;
+    const parsed = Number.parseFloat(normalized);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function formatEquipmentWeightTotal(value) {
+    const rounded = Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+    if (!Number.isFinite(rounded)) return '0';
+    return Number.isInteger(rounded)
+      ? String(rounded)
+      : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function computeEquippedInventoryWeightTotal(char) {
+    const rows = getRepeatingSectionRows(char, 'repeating_inventory');
+    let total = 0;
+
+    rows.forEach((row) => {
+      const name = pickRowFieldValue(row.fields, ['itemname', 'name', 'item', 'item_name']);
+      if (!name) return;
+
+      const marker = name.match(/^\s*\[CAT\]\s*(.+)\s*$/i);
+      if (marker) return;
+
+      const equipField = pickRowFieldKey(row.fields, [
+        'equipped',
+        'itemequipped',
+        'is_equipped',
+        'isequipped',
+        'equip',
+      ]);
+      const equipped = equipField ? sheetCheckboxValue(row.fields[equipField]) : false;
+      if (!equipped) return;
+
+      const countRaw = pickRowFieldValue(row.fields, ['itemcount', 'count', 'qty', 'quantity']);
+      const weightRaw = pickRowFieldValue(row.fields, ['itemweight', 'weight', 'lbs', 'lb']);
+      const count = parseEquipmentNumber(countRaw, 1);
+      const weight = parseEquipmentNumber(weightRaw, 0);
+      if (!Number.isFinite(count) || !Number.isFinite(weight)) return;
+
+      total += count * weight;
+    });
+
+    return total;
+  }
+
+  function recomputeInventoryWeightTotal(char = null) {
+    const targetChar = char || getSelectedChar();
+    if (!targetChar) return '0';
+
+    const total = computeEquippedInventoryWeightTotal(targetChar);
+    const value = formatEquipmentWeightTotal(total);
+    setCharAttrValue(targetChar, 'weighttotal', value);
+    setSheetInputValueByAttrName('weighttotal', value);
+    return value;
   }
 
   function getEquipmentState() {
@@ -4361,6 +4597,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       <div id="tm-left-tools">
         <div class="toggle icon-only" data-sec="characters" data-label="Fiches">
           <img src="${icon('Fiches')}">
+          <span class="tm-char-mode-badge" data-char-mode-badge>PJ</span>
         </div>
         <div class="toggle icon-only" data-sec="currency" data-label="Bourse">
           <img src="${icon('coins')}">
@@ -4500,10 +4737,37 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       padding:0;
     }
 
+    #tm-root .toggle.is-disabled{
+      opacity:0.42;
+      filter:saturate(0.35);
+      cursor:not-allowed;
+      pointer-events:auto;
+    }
+
+    #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="4"]{
+      display:none;
+    }
+
     #tm-root .toggle.icon-only{
       width:var(--tm-cell-size);
       min-width:var(--tm-cell-size);
       padding:0;
+    }
+
+    #tm-root .tm-char-mode-badge{
+      position:absolute;
+      left:50%;
+      bottom:2px;
+      transform:translateX(-50%);
+      font-size:7px;
+      letter-spacing:0.2px;
+      text-transform:uppercase;
+      font-weight:700;
+      line-height:1;
+      color:#ff4b4b;
+      text-shadow:0 1px 0 rgba(0,0,0,0.7);
+      pointer-events:none;
+      z-index:2;
     }
 
     #tm-root .settings{
@@ -4618,6 +4882,22 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         0 0 14px rgba(255,42,42,0.85),
         0 0 24px rgba(255,42,42,0.55),
         inset 0 0 0 1px rgba(255,120,120,0.65);
+    }
+
+    #tm-stats-grid .mode-btn.mode-adv.active{
+      border-color:#23d86a;
+      box-shadow:
+        0 0 14px rgba(35,216,106,0.85),
+        0 0 24px rgba(35,216,106,0.55),
+        inset 0 0 0 1px rgba(166,255,206,0.65);
+    }
+
+    #tm-stats-grid .mode-btn.mode-normal.active{
+      border-color:#c6ceda;
+      box-shadow:
+        0 0 12px rgba(198,206,218,0.8),
+        0 0 20px rgba(198,206,218,0.5),
+        inset 0 0 0 1px rgba(244,247,252,0.62);
     }
 
     .tm-popup{
@@ -4979,33 +5259,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       border-radius:999px;
       padding:1px 5px 0;
       line-height:1.25;
-    }
-
-    .tm-char-mj-toggle{
-      display:flex;
-      align-items:center;
-      gap:6px;
-      margin-top:2px;
-      padding:3px 5px;
-      border:1px solid rgba(120,193,255,0.55);
-      border-radius:6px;
-      background:rgba(29,57,92,0.26);
-      color:#cfe4ff;
-      font-size:10px;
-      line-height:1.2;
-      user-select:none;
-    }
-
-    .tm-char-mj-toggle input{
-      width:13px;
-      height:13px;
-      margin:0;
-      flex:0 0 auto;
-    }
-
-    .tm-char-mj-toggle span{
-      flex:1 1 auto;
-      min-width:0;
     }
 
     .tm-equip-static-toggle{
@@ -5608,6 +5861,9 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   }
 
   function open(sec, el) {
+    if (!el) return;
+    if (el.classList?.contains('is-disabled') || el.dataset?.toggleDisabled === '1') return;
+
     if (currentPopup && currentSection === sec) {
       closePopup();
       return;
@@ -5804,10 +6060,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   });
 
   window.addEventListener('mouseup', () => {
-    if (!MJ_MODE_ENABLED) return;
-    setTimeout(() => {
-      syncHudCharacterFromSelectedToken();
-    }, 0);
+    if (!isCurrentPlayerGm()) return;
+    scheduleMjTokenSync(0);
   });
 
   window.addEventListener('pointercancel', (e) => {
@@ -5965,6 +6219,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     const toggle = e.target.closest('.toggle');
     if (!toggle || !root.contains(toggle)) return;
+    if (toggle.classList.contains('is-disabled') || toggle.dataset.toggleDisabled === '1') return;
 
     open(toggle.dataset.sec, toggle);
   });
@@ -5996,17 +6251,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   });
 
   root.addEventListener('change', (e) => {
-    const mjModeInput = e.target.closest('input[type="checkbox"][data-char-mj-mode]');
-    if (mjModeInput && root.contains(mjModeInput)) {
-      setHudMjModeEnabled(mjModeInput.checked, { syncNow: true });
-      if (currentSection === 'characters' && currentPopup) {
-        currentPopup.innerHTML = buildCharacterPickerContent();
-        const searchInput = currentPopup.querySelector('input[data-char-filter]');
-        if (searchInput) searchInput.focus();
-      }
-      return;
-    }
-
     const spellMemInput = e.target.closest('input[type="checkbox"][data-spell-mem-rowid]');
     if (spellMemInput && root.contains(spellMemInput)) {
       setSpellMemorized(
@@ -6024,7 +6268,44 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     if (equipInput && root.contains(equipInput)) {
       const char = getSelectedChar();
       if (char) {
-        setCharAttrValue(char, equipInput.dataset.equipAttr, equipInput.checked ? '1' : '0');
+        const attrName = String(equipInput.dataset.equipAttr || '').trim();
+        const checked = Boolean(equipInput.checked);
+        const nextValue = checked ? '1' : '0';
+        let syncedThroughSheetUi = false;
+
+        syncedThroughSheetUi = setSheetCheckboxByAttrName(attrName, checked);
+
+        const repeatingMatch = attrName.match(/^repeating_inventory_([^_]+)_(.+)$/i);
+        if (repeatingMatch && !syncedThroughSheetUi) {
+          syncedThroughSheetUi = setSheetRepeatingCheckbox(
+            'repeating_inventory',
+            repeatingMatch[1],
+            repeatingMatch[2],
+            checked
+          );
+        }
+
+        if (!syncedThroughSheetUi) {
+          setSheetInputValueByAttrName(attrName, nextValue);
+        }
+
+        setCharAttrValue(char, attrName, nextValue);
+        recomputeInventoryWeightTotal(char);
+
+        // Some sheet recalcs are asynchronous after UI checkbox changes.
+        // Nudge common inventory sheetworkers if they exist.
+        setTimeout(() => {
+          invokeSheetFunction('update_inventory');
+          invokeSheetFunction('update_inventory_totals');
+          invokeSheetFunction('update_inventory_total');
+          invokeSheetFunction('update_weight');
+          invokeSheetFunction('update_encumbrance');
+          invokeSheetFunction('update_load');
+          invokeSheetFunction('update_carried_weight');
+          invokeSheetFunction('update_carry_weight');
+          invokeSheetFunction('update_equipment');
+          recomputeInventoryWeightTotal(char);
+        }, 90);
       }
       return;
     }
@@ -6071,8 +6352,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
 /* ================= INIT ================= */
 
-  if (MJ_MODE_ENABLED) {
-    syncHudCharacterFromSelectedToken();
+  bindMjCanvasSelectionSync();
+
+  if (isCurrentPlayerGm()) {
+    scheduleMjTokenSync(0);
   }
 
   prefetchAvailableCharacterAttributes();
