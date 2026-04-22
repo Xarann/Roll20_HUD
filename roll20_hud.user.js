@@ -1360,10 +1360,30 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       }
     };
 
+    const setButtonDisabledState = (buttonEl, disabled) => {
+      if (!buttonEl) return;
+      buttonEl.classList.toggle('is-disabled', Boolean(disabled));
+      buttonEl.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      if (disabled) {
+        buttonEl.dataset.btnDisabled = '1';
+      } else {
+        delete buttonEl.dataset.btnDisabled;
+      }
+    };
+
     const toggle = root.querySelector('.toggle[data-sec="characters"]');
     const currencyToggle = root.querySelector('.toggle[data-sec="currency"]');
+    const skillToggle = root.querySelector('.toggle[data-sec="skill"]');
+    const modsToggle = root.querySelector('.toggle[data-sec="mods"]');
     setToggleDisabledState(toggle, isMjMode);
     setToggleDisabledState(currencyToggle, isMjMode);
+    setToggleDisabledState(skillToggle, isMjMode);
+    setToggleDisabledState(modsToggle, isMjMode);
+
+    root.querySelectorAll('#tm-stats-grid .mode-btn[data-roll-mode]').forEach((btn) => {
+      setButtonDisabledState(btn, isMjMode);
+    });
+
     if (!toggle) return;
 
     const roleBadge = toggle.querySelector('[data-char-mode-badge]');
@@ -1377,6 +1397,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       (
         currentSection === 'characters' ||
         currentSection === 'currency' ||
+        currentSection === 'skill' ||
+        currentSection === 'mods' ||
         currentSection === 'resource' ||
         currentSection === 'traits' ||
         currentSection === 'equipment'
@@ -5867,10 +5889,17 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     }
 
     #tm-root .toggle.is-disabled{
-      opacity:0.42;
-      filter:saturate(0.35);
+      opacity:1;
+      filter:none;
       cursor:not-allowed;
       pointer-events:auto;
+      border-color:rgba(150,150,150,0.7);
+      background:#050505;
+    }
+
+    #tm-root .toggle.is-disabled img{
+      opacity:0.5;
+      filter:grayscale(0.85);
     }
 
     #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="4"]{
@@ -5878,7 +5907,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     }
 
     #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="3"],
-    #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="5"]{
+    #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="5"],
+    #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="6"]{
       display:none;
     }
 
@@ -5947,6 +5977,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     #tm-root.tm-mode-mj #tm-selected-token-debug{
       display:flex;
+      width:calc((var(--tm-cell-size) * 2) + var(--tm-cell-gap));
     }
 
     #tm-popup-zone{
@@ -6034,6 +6065,13 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       padding:0;
       cursor:pointer;
       box-sizing:border-box;
+    }
+
+    #tm-stats-grid .mode-btn.is-disabled{
+      opacity:0.42;
+      filter:saturate(0.35);
+      cursor:not-allowed;
+      pointer-events:auto;
     }
 
     #tm-stats-grid .mode-btn img{
@@ -7238,6 +7276,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const btn = e.target.closest('button');
     if (btn && root.contains(btn)) {
       if (btn.dataset.hudDragHandle) {
+        return;
+      }
+
+      if (btn.classList.contains('is-disabled') || btn.dataset.btnDisabled === '1') {
         return;
       }
 
