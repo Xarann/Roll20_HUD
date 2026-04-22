@@ -40,8 +40,12 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   let SELECTED_TRAIT_KEY = '';
   let SELECTED_SPELL_KEY = '';
   let SELECTED_EQUIPMENT_CATEGORY = '';
+  let LAST_POINTED_GRAPHIC_MODEL = null;
+  let LAST_TOKEN_EDITOR_SELECTION = null;
+  let LAST_UI_OVERLAY_SELECTION = null;
   let MJ_TOKEN_SYNC_TIMER = null;
   let MJ_CANVAS_SYNC_BOUND = false;
+  let MJ_TOKEN_EDITOR_SYNC_BOUND = false;
   let CHARACTER_FILTER_QUERY = localStorage.getItem('tm_character_filter') || '';
   let SPELL_SHOW_ALL = localStorage.getItem('tm_spell_show_all') === '1';
   const PREFETCHED_CHAR_IDS = new Set();
@@ -153,18 +157,597 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     return LOCKED_CHAR;
   }
 
+  function getGraphicField(source, keys) {
+    const keyList = Array.isArray(keys) ? keys : [keys];
+    const queue = [source];
+    const seen = new Set();
+
+    while (queue.length) {
+      const candidate = queue.shift();
+      if (!candidate || typeof candidate !== 'object' || seen.has(candidate)) continue;
+      seen.add(candidate);
+
+      for (const key of keyList) {
+        let value;
+        try {
+          if (typeof candidate.get === 'function') {
+            value = candidate.get(key);
+          }
+        } catch (_error) {}
+
+        if (value == null && Object.prototype.hasOwnProperty.call(candidate, key)) {
+          value = candidate[key];
+        }
+
+        if (value == null && candidate.attributes && Object.prototype.hasOwnProperty.call(candidate.attributes, key)) {
+          value = candidate.attributes[key];
+        }
+
+        if (value != null && String(value).trim() !== '') {
+          return value;
+        }
+      }
+
+      queue.push(
+        candidate.attributes,
+        candidate.attrs,
+        candidate.data,
+        candidate.props,
+        candidate.state,
+        candidate.model,
+        candidate._model,
+        candidate.graphic,
+        candidate.token,
+        candidate.target,
+        candidate.object,
+        candidate.fabricObject,
+        candidate.tokenModel,
+        candidate.tokenData,
+        candidate.metadata
+      );
+    }
+
+    return '';
+  }
+
+  function normalizeReferenceId(raw) {
+    const value = String(raw || '').trim();
+    if (!value) return '';
+
+    let normalized = value.replace(/^["']+|["']+$/g, '').trim();
+    if (!normalized) return '';
+
+    if (normalized.includes('?')) {
+      normalized = normalized.split('?')[0].trim();
+    }
+    if (normalized.includes('#')) {
+      normalized = normalized.split('#')[0].trim();
+    }
+
+    const chunks = normalized.split(/[|:]/).map((part) => part.trim()).filter(Boolean);
+    if (chunks.length) {
+      normalized = chunks[chunks.length - 1];
+    }
+
+    if (normalized.includes('/')) {
+      const slashParts = normalized.split('/').map((part) => part.trim()).filter(Boolean);
+      if (slashParts.length) {
+        normalized = slashParts[slashParts.length - 1];
+      }
+    }
+
+    return normalized.trim();
+  }
+
+  function parsePxNumber(raw) {
+    const value = parseFloat(String(raw || '').replace('px', '').trim());
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function parseTranslateFromStyle(rawTransform) {
+    const value = String(rawTransform || '').trim();
+    if (!value) return null;
+
+    const m2d = value.match(/translate\(\s*([-+]?\d*\.?\d+)px\s*,\s*([-+]?\d*\.?\d+)px\s*\)/i);
+    if (m2d) {
+      const x = parseFloat(m2d[1]);
+      const y = parseFloat(m2d[2]);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+
+    const m3d = value.match(/translate3d\(\s*([-+]?\d*\.?\d+)px\s*,\s*([-+]?\d*\.?\d+)px\s*,\s*([-+]?\d*\.?\d+)px\s*\)/i);
+    if (m3d) {
+      const x = parseFloat(m3d[1]);
+      const y = parseFloat(m3d[2]);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+
+    const matrix = value.match(/matrix\(\s*[-+]?\d*\.?\d+\s*,\s*[-+]?\d*\.?\d+\s*,\s*[-+]?\d*\.?\d+\s*,\s*[-+]?\d*\.?\d+\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*\)/i);
+    if (matrix) {
+      const x = parseFloat(matrix[1]);
+      const y = parseFloat(matrix[2]);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+
+    return null;
+  }
+
+  function readUiOverlaySelectionSnapshot() {
+    const vmLayer = document.querySelector('#vm-tabletop-ui-layer');
+    const tabletopLayer = vmLayer?.querySelector?.('#tabletop-ui-layer') || document.querySelector('#tabletop-ui-layer');
+    const radialMenu = vmLayer?.querySelector?.('#radial-menu') || document.querySelector('#radial-menu');
+
+    if (!tabletopLayer || !radialMenu) return null;
+
+    const tableTranslate = parseTranslateFromStyle(tabletopLayer.style?.transform);
+    const radialTranslate = parseTranslateFromStyle(radialMenu.style?.transform);
+    const radialHeight = parsePxNumber(radialMenu.style?.height);
+
+    if (!tableTranslate || !radialTranslate || !Number.isFinite(radialHeight)) return null;
+
+    // Empirically in Jumpgate:
+    // overlayCenter ~= radialOrigin + (35, radialHeight/2) - tabletopTranslate
+    const targetLeft = radialTranslate.x + 35 - tableTranslate.x;
+    const targetTop = radialTranslate.y + radialHeight / 2 - tableTranslate.y;
+
+    const overlays = Array.from(tabletopLayer.querySelectorAll('.overlay'));
+    if (!overlays.length) return null;
+
+    let best = null;
+    overlays.forEach((overlay) => {
+      const left = parsePxNumber(overlay.style?.left);
+      const top = parsePxNumber(overlay.style?.top);
+      if (!Number.isFinite(left) || !Number.isFinite(top)) return;
+
+      const dx = left - targetLeft;
+      const dy = top - targetTop;
+      const dist = Math.hypot(dx, dy);
+
+      if (!best || dist < best.dist) {
+        const name =
+          String(overlay.querySelector('.nameplate-container span')?.textContent || '').trim() ||
+          String(overlay.querySelector('.nameplate-container .text')?.textContent || '').trim();
+        best = { overlay, left, top, dist, name };
+      }
+    });
+
+    if (!best) return null;
+    if (best.dist > Math.max(120, radialHeight * 0.9)) return null;
+
+    const snapshot = {
+      name: String(best.name || '').trim(),
+      left: best.left,
+      top: best.top,
+      dist: best.dist,
+      radialHeight,
+      at: Date.now(),
+      source: 'ui-overlay',
+    };
+    LAST_UI_OVERLAY_SELECTION = snapshot;
+    return snapshot;
+  }
+
+  function findGraphicModelByApproxPosition(left, top) {
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+
+    const models = getActivePageGraphicModels();
+    if (!models.length) return null;
+
+    let best = null;
+    models.forEach((model) => {
+      const x = parseFloat(String(getGraphicField(model, ['left', 'x', 'centerx', 'centerX']) || ''));
+      const y = parseFloat(String(getGraphicField(model, ['top', 'y', 'centery', 'centerY']) || ''));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+      const dist = Math.hypot(x - left, y - top);
+      if (!best || dist < best.dist) {
+        best = { model, dist };
+      }
+    });
+
+    if (!best) return null;
+    if (best.dist > 140) return null;
+    return best.model;
+  }
+
+  function findGraphicModelByName(name) {
+    const wanted = String(name || '').trim().toLowerCase();
+    if (!wanted) return null;
+
+    const models = getActivePageGraphicModels();
+    if (!models.length) return null;
+
+    const matches = models.filter((model) => {
+      const tokenName = String(
+        getGraphicField(model, ['name', 'token_name', 'displayname', 'displayName', 'title']) || ''
+      )
+        .trim()
+        .toLowerCase();
+      return Boolean(tokenName) && tokenName === wanted;
+    });
+
+    if (!matches.length) return null;
+    if (matches.length === 1) return matches[0];
+
+    // If duplicate names exist, prefer the one nearest last UI overlay position.
+    const uiSnapshot = LAST_UI_OVERLAY_SELECTION || readUiOverlaySelectionSnapshot();
+    if (!uiSnapshot) return matches[0];
+
+    let best = null;
+    matches.forEach((model) => {
+      const x = parseFloat(String(getGraphicField(model, ['left', 'x', 'centerx', 'centerX']) || ''));
+      const y = parseFloat(String(getGraphicField(model, ['top', 'y', 'centery', 'centerY']) || ''));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const dist = Math.hypot(x - uiSnapshot.left, y - uiSnapshot.top);
+      if (!best || dist < best.dist) {
+        best = { model, dist };
+      }
+    });
+
+    return best?.model || matches[0];
+  }
+
+  function getModelArrayFromCollection(collection) {
+    if (!collection) return [];
+
+    if (Array.isArray(collection)) return collection;
+    if (Array.isArray(collection.models)) return collection.models;
+
+    const values = [];
+    if (typeof collection.each === 'function') {
+      try {
+        collection.each((model) => {
+          if (model) values.push(model);
+        });
+      } catch (_error) {}
+    }
+    if (values.length) return values;
+
+    try {
+      return Object.values(collection).filter((item) => item && typeof item === 'object');
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function getGraphicModelsFromPage(page) {
+    if (!page || typeof page !== 'object') return [];
+
+    const collections = [
+      page.thegraphics,
+      page.graphics,
+      page.tokens,
+      page.thetokens,
+      page.theTokens,
+      page.objects,
+      page.theobjects,
+    ];
+
+    const merged = [];
+    collections.forEach((collection) => {
+      getModelArrayFromCollection(collection).forEach((model) => {
+        if (model && typeof model === 'object') merged.push(model);
+      });
+    });
+    return merged;
+  }
+
+  function getCampaignPageModels() {
+    const pages = [];
+    const pushPages = (candidate) => {
+      if (!candidate) return;
+      getModelArrayFromCollection(candidate).forEach((page) => {
+        if (page && typeof page === 'object') pages.push(page);
+      });
+    };
+
+    pushPages(window.Campaign?.pages);
+    pushPages(window.d20?.Campaign?.pages);
+    return pages;
+  }
+
+  function getActivePageGraphicModels() {
+    const candidates = [];
+
+    const campaignActivePage = window.Campaign?.activePage;
+    try {
+      if (typeof campaignActivePage === 'function') {
+        const resolved = campaignActivePage.call(window.Campaign);
+        if (resolved) candidates.push(resolved);
+      } else if (campaignActivePage && typeof campaignActivePage === 'object') {
+        candidates.push(campaignActivePage);
+      }
+    } catch (_error) {}
+
+    const d20CampaignActivePage = window.d20?.Campaign?.activePage;
+    try {
+      if (typeof d20CampaignActivePage === 'function') {
+        const resolved = d20CampaignActivePage.call(window.d20.Campaign);
+        if (resolved) candidates.push(resolved);
+      } else if (d20CampaignActivePage && typeof d20CampaignActivePage === 'object') {
+        candidates.push(d20CampaignActivePage);
+      }
+    } catch (_error) {}
+
+    for (const page of candidates) {
+      const models = getGraphicModelsFromPage(page);
+      if (models.length) return models;
+    }
+
+    const allPages = getCampaignPageModels();
+    for (const page of allPages) {
+      const models = getGraphicModelsFromPage(page);
+      if (models.length) return models;
+    }
+
+    const canvasObjects = window.d20?.engine?.canvas?._objects;
+    if (Array.isArray(canvasObjects) && canvasObjects.length) {
+      return canvasObjects;
+    }
+
+    return [];
+  }
+
+  function findGraphicModelById(graphicId) {
+    const wanted = normalizeReferenceId(graphicId);
+    if (!wanted) return null;
+
+    const models = getActivePageGraphicModels();
+    if (!models.length) return null;
+
+    return (
+      models.find((model) => {
+        const id = normalizeReferenceId(
+          getGraphicField(model, ['_id', 'id', 'uuid', 'guid', 'tokenid', 'tokenId', 'graphicid', 'objectid'])
+        );
+        return id === wanted;
+      }) || null
+    );
+  }
+
+  function isGraphicLikeCandidate(model) {
+    const type = String(getGraphicField(model, ['_type', 'type', 'objectType', 'kind'])).toLowerCase().trim();
+    if (type && type !== 'graphic' && type !== 'token' && type !== 'image' && type !== 'sprite') {
+      return false;
+    }
+
+    const represents = String(getGraphicField(model, ['represents', 'characterid', 'characterId', 'character_id'])).trim();
+    const hasGraphicHints = [
+      'layer',
+      'imgsrc',
+      'imgSrc',
+      'pageid',
+      'left',
+      'top',
+      'width',
+      'height',
+      'bar1_value',
+      'bar1_max',
+    ].some((field) => String(getGraphicField(model, field)).trim() !== '');
+
+    return Boolean(type || represents || hasGraphicHints);
+  }
+
+  function resolveGraphicModelEntry(entry) {
+    if (entry == null) return null;
+
+    if (typeof entry === 'string' || typeof entry === 'number') {
+      return findGraphicModelById(entry);
+    }
+
+    if (typeof entry !== 'object') return null;
+
+    const candidates = [
+      entry,
+      entry.model,
+      entry._model,
+      entry.graphic,
+      entry.token,
+      entry.tokenId,
+      entry.tokenid,
+      entry.id,
+      entry._id,
+      entry.target,
+      entry.object,
+      entry.fabricObject,
+      entry.tokenModel,
+      entry.tokenData,
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate == null) continue;
+
+      if (typeof candidate === 'string' || typeof candidate === 'number') {
+        const byId = findGraphicModelById(candidate);
+        if (byId) return byId;
+        continue;
+      }
+
+      if (typeof candidate !== 'object') continue;
+      const model = candidate?.model || candidate;
+      if (!model || typeof model !== 'object') continue;
+      if (!isGraphicLikeCandidate(model)) continue;
+      return model;
+    }
+
+    return null;
+  }
+
+  function getGraphicModelId(model) {
+    if (!model) return '';
+    return normalizeReferenceId(getGraphicField(model, ['_id', 'id', 'uuid', 'guid']));
+  }
+
+  function extractTokenSelectionSnapshot(source) {
+    if (!source) return null;
+
+    const name = String(
+      getGraphicField(source, ['name', 'token_name', 'displayname', 'displayName', 'title'])
+    ).trim();
+    const represents = normalizeReferenceId(
+      getGraphicField(source, ['represents', 'characterid', 'characterId', 'character_id', 'character'])
+    );
+    const tokenId = normalizeReferenceId(
+      getGraphicField(source, [
+        '_id',
+        'id',
+        'tokenid',
+        'tokenId',
+        'token_id',
+        'graphicid',
+        'graphicId',
+        'objectid',
+        'objectId',
+        'modelid',
+        'modelId',
+        'uuid',
+        'guid',
+      ])
+    );
+
+    if (!name && !represents && !tokenId) return null;
+    return { name, represents, tokenId, at: Date.now() };
+  }
+
+  function rememberTokenSelectionSnapshot(source) {
+    const snapshot = extractTokenSelectionSnapshot(source);
+    if (!snapshot) return false;
+    LAST_TOKEN_EDITOR_SELECTION = snapshot;
+    return true;
+  }
+
+  function getTokenEditorSelectionSnapshot() {
+    const editor = window.d20?.token_editor;
+    if (!editor) return LAST_TOKEN_EDITOR_SELECTION || null;
+
+    const candidates = [
+      editor.token,
+      editor.currenttoken,
+      editor._token,
+      editor.selected,
+      editor.lastselected,
+      editor.target,
+      editor.radialtoken,
+      editor.radialmenu,
+      editor.menu_token,
+      editor,
+    ];
+
+    for (const candidate of candidates) {
+      if (rememberTokenSelectionSnapshot(candidate)) break;
+    }
+
+    const findDeepSnapshot = (rootObject) => {
+      if (!rootObject || typeof rootObject !== 'object') return null;
+
+      const queue = [{ node: rootObject, depth: 0 }];
+      const seen = new Set();
+      const found = [];
+      const maxDepth = 3;
+      const maxVisited = 450;
+
+      const parseSelectedFlag = (value) => {
+        if (value === true || value === 1) return true;
+        const token = String(value || '').trim().toLowerCase();
+        return token === 'true' || token === '1' || token === 'yes' || token === 'selected' || token === 'active';
+      };
+
+      while (queue.length && seen.size < maxVisited) {
+        const { node, depth } = queue.shift();
+        if (!node || typeof node !== 'object' || seen.has(node)) continue;
+        seen.add(node);
+
+        const snapshot = extractTokenSelectionSnapshot(node);
+        if (snapshot) {
+          const selectedHints = [
+            getGraphicField(node, ['selected', 'isSelected', 'active', 'isActive', '_selected', '_active']),
+            getGraphicField(node, ['selection', 'selectionState', 'state']),
+          ];
+          let score = 0;
+          if (snapshot.represents) score += 4;
+          if (snapshot.name) score += 3;
+          if (snapshot.tokenId) score += 2;
+          if (selectedHints.some(parseSelectedFlag)) score += 5;
+          found.push({ snapshot, score });
+        }
+
+        if (depth >= maxDepth) continue;
+
+        let keys = [];
+        try {
+          keys = Object.keys(node);
+        } catch (_error) {
+          keys = [];
+        }
+
+        keys.slice(0, 90).forEach((key) => {
+          if (key === '__proto__' || key === 'prototype' || key === 'constructor') return;
+          let child = null;
+          try {
+            child = node[key];
+          } catch (_error) {
+            child = null;
+          }
+          if (!child || typeof child === 'function') return;
+          if (Array.isArray(child)) {
+            child.slice(0, 30).forEach((value) => {
+              if (value && typeof value === 'object') queue.push({ node: value, depth: depth + 1 });
+            });
+            return;
+          }
+          if (typeof child === 'object') {
+            queue.push({ node: child, depth: depth + 1 });
+          }
+        });
+
+        if (node.attributes && typeof node.attributes === 'object') {
+          queue.push({ node: node.attributes, depth: depth + 1 });
+        }
+      }
+
+      if (!found.length) return null;
+      found.sort((a, b) => b.score - a.score);
+      return found[0].snapshot;
+    };
+
+    const deepEditorSnapshot = findDeepSnapshot(editor);
+    if (deepEditorSnapshot) {
+      rememberTokenSelectionSnapshot(deepEditorSnapshot);
+    }
+
+    if (!LAST_TOKEN_EDITOR_SELECTION) {
+      const deepEngineSnapshot = findDeepSnapshot(window.d20?.engine);
+      if (deepEngineSnapshot) {
+        rememberTokenSelectionSnapshot(deepEngineSnapshot);
+      }
+    }
+
+    return LAST_TOKEN_EDITOR_SELECTION || null;
+  }
+
+  function setLastPointedGraphicModel(entry) {
+    const model = resolveGraphicModelEntry(entry);
+    if (!model) return false;
+    LAST_POINTED_GRAPHIC_MODEL = model;
+    rememberTokenSelectionSnapshot(model);
+    return true;
+  }
+
   function getSelectedGraphicModels() {
     const results = [];
+    const seenModels = new Set();
     const seenIds = new Set();
 
     const pushGraphicModel = (entry) => {
-      const model = entry?.model || entry;
-      if (!model || typeof model.get !== 'function') return;
+      const model = resolveGraphicModelEntry(entry);
+      if (!model) return;
 
-      const type = String(model.get('_type') || '').toLowerCase();
-      if (type && type !== 'graphic') return;
+      const type = String(getGraphicField(model, ['_type', 'type', 'objectType', 'kind'])).toLowerCase().trim();
+      if (type && type !== 'graphic' && type !== 'token' && type !== 'image' && type !== 'sprite') return;
 
-      const id = String(model.id || model.get('_id') || '').trim();
+      if (seenModels.has(model)) return;
+      seenModels.add(model);
+      const id = getGraphicModelId(model);
       if (id && seenIds.has(id)) return;
       if (id) seenIds.add(id);
       results.push(model);
@@ -176,15 +759,32 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         raw.forEach(pushGraphicModel);
         return;
       }
+      if (Array.isArray(raw._objects)) {
+        raw._objects.forEach(pushGraphicModel);
+        return;
+      }
+      if (Array.isArray(raw.models)) {
+        raw.models.forEach(pushGraphicModel);
+        return;
+      }
+      if (Array.isArray(raw.selected)) {
+        raw.selected.forEach(pushGraphicModel);
+        return;
+      }
+      if (Array.isArray(raw.targets)) {
+        raw.targets.forEach(pushGraphicModel);
+        return;
+      }
+      if (Array.isArray(raw.tokens)) {
+        raw.tokens.forEach(pushGraphicModel);
+        return;
+      }
       pushGraphicModel(raw);
     };
 
-    try {
-      const selectedFn = window.d20?.engine?.selected;
-      if (typeof selectedFn === 'function') {
-        collect(selectedFn.call(window.d20.engine));
-      }
-    } catch (_error) {}
+    if (LAST_POINTED_GRAPHIC_MODEL) {
+      pushGraphicModel(LAST_POINTED_GRAPHIC_MODEL);
+    }
 
     try {
       const canvas = window.d20?.engine?.canvas;
@@ -193,14 +793,267 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       } else if (canvas && typeof canvas.getActiveObject === 'function') {
         collect(canvas.getActiveObject());
       }
+
+      if (canvas) {
+        collect(canvas._activeObject);
+        collect(canvas._activeSelection);
+        if (typeof canvas._activeSelection?.getObjects === 'function') {
+          collect(canvas._activeSelection.getObjects());
+        }
+        if (typeof canvas._activeObject?.getObjects === 'function') {
+          collect(canvas._activeObject.getObjects());
+        }
+      }
     } catch (_error) {}
+
+    try {
+      const selectedFn = window.d20?.engine?.selected;
+      if (typeof selectedFn === 'function') {
+        collect(selectedFn.call(window.d20.engine));
+      } else {
+        collect(selectedFn);
+      }
+    } catch (_error) {}
+
+    try {
+      const engine = window.d20?.engine;
+      collect(engine?.selected_tokens);
+      collect(engine?.selectedTokens);
+      collect(engine?.selected_token);
+      collect(engine?.selectedToken);
+      collect(engine?.selectedTokenIds);
+      collect(engine?.selected_ids);
+    } catch (_error) {}
+
+    try {
+      const tokenEditor = window.d20?.token_editor;
+      collect(tokenEditor?.token);
+      collect(tokenEditor?._token);
+      collect(tokenEditor?.currenttoken);
+      collect(tokenEditor?.selected);
+      collect(tokenEditor?.target);
+    } catch (_error) {}
+
+    const editorSnapshot = getTokenEditorSelectionSnapshot();
+    if (editorSnapshot?.tokenId) {
+      pushGraphicModel(editorSnapshot.tokenId);
+    }
+    if (editorSnapshot?.name) {
+      pushGraphicModel(findGraphicModelByName(editorSnapshot.name));
+    }
+    if (editorSnapshot?.represents) {
+      pushGraphicModel(
+        getActivePageGraphicModels().find((model) => {
+          const rep = normalizeReferenceId(
+            getGraphicField(model, ['represents', 'characterid', 'characterId', 'character_id'])
+          );
+          return Boolean(rep) && rep === normalizeReferenceId(editorSnapshot.represents);
+        })
+      );
+    }
+
+    const uiSnapshot = readUiOverlaySelectionSnapshot() || LAST_UI_OVERLAY_SELECTION;
+    if (uiSnapshot) {
+      pushGraphicModel(findGraphicModelByApproxPosition(uiSnapshot.left, uiSnapshot.top));
+      if (uiSnapshot.name) {
+        pushGraphicModel(findGraphicModelByName(uiSnapshot.name));
+      }
+    }
 
     return results;
   }
 
   function getCharacterIdFromGraphicModel(graphicModel) {
     if (!graphicModel) return '';
-    return String(graphicModel.get?.('represents') || graphicModel.attributes?.represents || '').trim();
+    return normalizeReferenceId(
+      getGraphicField(graphicModel, ['represents', 'characterid', 'characterId', 'character_id']) || ''
+    );
+  }
+
+  function getCharAttrModelById(char, attrId) {
+    const wanted = normalizeReferenceId(attrId);
+    if (!wanted) return null;
+    const models = char?.attribs?.models || [];
+    return (
+      models.find((attr) => {
+        const id = normalizeReferenceId(attr?.id || attr?.get?.('_id'));
+        return id === wanted;
+      }) || null
+    );
+  }
+
+  function setGraphicField(graphicModel, field, value) {
+    if (!graphicModel || !field) return false;
+
+    let changed = false;
+    try {
+      if (typeof graphicModel.get === 'function') {
+        const current = graphicModel.get(field);
+        if (String(current ?? '') !== String(value ?? '')) {
+          if (typeof graphicModel.set === 'function') {
+            graphicModel.set(field, value);
+            changed = true;
+          }
+        }
+      } else if (Object.prototype.hasOwnProperty.call(graphicModel, field)) {
+        if (String(graphicModel[field] ?? '') !== String(value ?? '')) {
+          graphicModel[field] = value;
+          changed = true;
+        }
+      } else if (graphicModel.attributes && typeof graphicModel.attributes === 'object') {
+        if (String(graphicModel.attributes[field] ?? '') !== String(value ?? '')) {
+          graphicModel.attributes[field] = value;
+          changed = true;
+        }
+      }
+    } catch (_error) {}
+
+    return changed;
+  }
+
+  function syncSelectedTokenAttrLinksForMj(graphicModel, representedChar) {
+    if (!isCurrentPlayerGm()) return false;
+    if (!graphicModel || !representedChar) return false;
+
+    const isNpc = getCharacterSheetType(representedChar) === 'npc';
+    const wrongToRight = isNpc
+      ? { hp: 'npc_hp', ac: 'npc_ac' }
+      : { npc_hp: 'hp', npc_ac: 'ac' };
+
+    const targetHpAttr = getCharAttrModel(representedChar, wrongToRight.hp);
+    const targetAcAttr = getCharAttrModel(representedChar, wrongToRight.ac);
+    if (!targetHpAttr && !targetAcAttr) return false;
+
+    let changed = false;
+
+    const fixLinkForBar = (barIndex) => {
+      const linkField = `bar${barIndex}_link`;
+      const valueField = `bar${barIndex}_value`;
+      const maxField = `bar${barIndex}_max`;
+      const linkRaw = normalizeReferenceId(getGraphicField(graphicModel, [linkField]));
+      if (!linkRaw) return;
+
+      const linkedAttr = getCharAttrModelById(representedChar, linkRaw);
+      let linkedName = String(linkedAttr?.get?.('name') || '').trim().toLowerCase();
+      if (!linkedName) linkedName = String(linkRaw || '').trim().toLowerCase();
+
+      if (linkedName === 'npc_hp' || linkedName === 'hp') {
+        if (!targetHpAttr) return;
+        const targetId = normalizeReferenceId(targetHpAttr.id || targetHpAttr.get('_id'));
+        if (targetId && targetId !== linkRaw) {
+          changed = setGraphicField(graphicModel, linkField, targetId) || changed;
+        }
+        const current = String(targetHpAttr.get('current') || '').trim();
+        const max = String(targetHpAttr.get('max') || '').trim();
+        if (current) changed = setGraphicField(graphicModel, valueField, current) || changed;
+        if (max) changed = setGraphicField(graphicModel, maxField, max) || changed;
+      }
+
+      if (linkedName === 'npc_ac' || linkedName === 'ac') {
+        if (!targetAcAttr) return;
+        const targetId = normalizeReferenceId(targetAcAttr.id || targetAcAttr.get('_id'));
+        if (targetId && targetId !== linkRaw) {
+          changed = setGraphicField(graphicModel, linkField, targetId) || changed;
+        }
+        const current = String(targetAcAttr.get('current') || '').trim();
+        if (current) changed = setGraphicField(graphicModel, valueField, current) || changed;
+      }
+    };
+
+    [1, 2, 3].forEach(fixLinkForBar);
+
+    if (changed) {
+      try {
+        if (typeof graphicModel.save === 'function') {
+          graphicModel.save();
+        }
+      } catch (_error) {}
+    }
+
+    return changed;
+  }
+
+  function getCampaignCharacterById(charId) {
+    const wanted = String(charId || '').trim();
+    if (!wanted) return null;
+
+    const collection = window.Campaign?.characters;
+    if (!collection) return null;
+
+    if (typeof collection.get === 'function') {
+      const direct = collection.get(wanted);
+      if (direct) return direct;
+    }
+
+    const models = collection.models || [];
+    return models.find((char) => getCharacterId(char) === wanted) || null;
+  }
+
+  function getGraphicDisplayName(graphicModel) {
+    if (!graphicModel) return '';
+
+    const directName = String(
+      getGraphicField(graphicModel, ['name', 'token_name', 'displayname', 'displayName', 'title'])
+    ).trim();
+    if (directName) return directName;
+
+    const representedId = getCharacterIdFromGraphicModel(graphicModel);
+    if (representedId) {
+      const representedChar = getCampaignCharacterById(representedId);
+      if (representedChar) {
+        const charName = getCharacterDisplayName(representedChar);
+        if (charName && charName !== 'Fiche sans nom') return charName;
+      }
+    }
+
+    const tokenId = getGraphicModelId(graphicModel);
+    if (tokenId) return `Token ${tokenId.slice(0, 6)}`;
+    return '';
+  }
+
+  function getSelectedMapTokenName() {
+    const selectedGraphics = getSelectedGraphicModels();
+    for (const graphic of selectedGraphics) {
+      const name = getGraphicDisplayName(graphic);
+      if (name) return name;
+    }
+
+    const editorSnapshot = getTokenEditorSelectionSnapshot();
+    if (editorSnapshot?.name) return editorSnapshot.name;
+
+    const uiSnapshot = readUiOverlaySelectionSnapshot() || LAST_UI_OVERLAY_SELECTION;
+    if (uiSnapshot?.name) return uiSnapshot.name;
+
+    return '';
+  }
+
+  function updateSelectedTokenDebugLabel() {
+    if (!root) return;
+
+    const debugBox = root.querySelector('[data-selected-token-debug]');
+    if (!debugBox) return;
+
+    const isMjMode = isCurrentPlayerGm();
+    const tokenName = isMjMode ? getSelectedMapTokenName() : '';
+    const selectedCount = getSelectedGraphicModels().length;
+    const editorSnapshot = isMjMode ? getTokenEditorSelectionSnapshot() : null;
+    const uiSnapshot = isMjMode ? (readUiOverlaySelectionSnapshot() || LAST_UI_OVERLAY_SELECTION) : null;
+    const label =
+      tokenName ||
+      (editorSnapshot?.name
+        ? editorSnapshot.name
+        : uiSnapshot?.name
+          ? `ui:${uiSnapshot.name}`
+        : editorSnapshot?.tokenId
+          ? `id:${String(editorSnapshot.tokenId).slice(0, 10)}`
+          : editorSnapshot?.represents
+            ? `rep:${String(editorSnapshot.represents).slice(0, 10)}`
+            : selectedCount > 0
+              ? `sélection (${selectedCount})`
+              : 'aucun');
+
+    debugBox.textContent = `Token sélectionné : ${label}`;
+    debugBox.dataset.label = `Token sélectionné sur la map : ${label}`;
   }
 
   function getCharacterFromSelectedToken() {
@@ -221,6 +1074,23 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       if (found) return found;
     }
 
+    const editorSnapshot = getTokenEditorSelectionSnapshot();
+    const snapshotRepresents = String(editorSnapshot?.represents || '').trim();
+    if (snapshotRepresents) {
+      const found = byId.get(snapshotRepresents);
+      if (found) return found;
+    }
+
+    const uiSnapshot = readUiOverlaySelectionSnapshot() || LAST_UI_OVERLAY_SELECTION;
+    if (uiSnapshot?.name) {
+      const fromUiName = findGraphicModelByName(uiSnapshot.name);
+      const fromUiRepId = getCharacterIdFromGraphicModel(fromUiName);
+      if (fromUiRepId) {
+        const found = byId.get(fromUiRepId);
+        if (found) return found;
+      }
+    }
+
     return null;
   }
 
@@ -233,16 +1103,23 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const representedId = getCharacterId(representedChar);
     if (!representedId) return false;
 
+    const selectedGraphics = getSelectedGraphicModels();
+    selectedGraphics.forEach((graphic) => {
+      if (getCharacterIdFromGraphicModel(graphic) !== representedId) return;
+      syncSelectedTokenAttrLinksForMj(graphic, representedChar);
+    });
+
     const currentId = getCharacterId(getSelectedChar());
     if (representedId === currentId) return false;
 
     return selectHudCharacterById(representedId);
   }
 
-  function scheduleMjTokenSync(delayMs = 0) {
+  function scheduleMjTokenSync(delayMs = 0, retryCount = 0) {
     if (!isCurrentPlayerGm()) return;
 
     const delay = Math.max(0, parseIntSafe(delayMs, 0));
+    const retries = Math.max(0, parseIntSafe(retryCount, 0));
     if (MJ_TOKEN_SYNC_TIMER) {
       clearTimeout(MJ_TOKEN_SYNC_TIMER);
       MJ_TOKEN_SYNC_TIMER = null;
@@ -250,10 +1127,16 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     MJ_TOKEN_SYNC_TIMER = setTimeout(() => {
       MJ_TOKEN_SYNC_TIMER = null;
+      updateSelectedTokenDebugLabel();
       const switched = syncHudCharacterFromSelectedToken();
+      const tokenName = getSelectedMapTokenName();
 
       if (!switched && currentSection === 'characters' && currentPopup) {
         currentPopup.innerHTML = buildCharacterPickerContent();
+      }
+
+      if (!switched && !tokenName && retries > 0) {
+        scheduleMjTokenSync(120, retries - 1);
       }
     }, delay);
   }
@@ -264,19 +1147,51 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const canvas = window.d20?.engine?.canvas;
     if (!canvas || typeof canvas.on !== 'function') return;
 
+    const updatePointedFromPayload = (eventName, payload) => {
+      const candidates = [
+        payload,
+        payload?.target,
+        payload?.selected,
+        payload?.deselected,
+        payload?.subTargets,
+        payload?.data,
+        payload?.object,
+        payload?.e?.target,
+        payload?.e?.subTargets,
+      ];
+
+      for (const candidate of candidates) {
+        if (setLastPointedGraphicModel(candidate)) return true;
+      }
+
+      if (eventName === 'selection:cleared') {
+        LAST_POINTED_GRAPHIC_MODEL = null;
+        LAST_TOKEN_EDITOR_SELECTION = null;
+        LAST_UI_OVERLAY_SELECTION = null;
+      }
+
+      return false;
+    };
+
     const eventNames = [
       'selection:created',
       'selection:updated',
       'selection:cleared',
       'object:selected',
       'object:deselected',
+      'mouse:down',
+      'mouse:up',
+      'mouse:over',
     ];
 
     let boundAny = false;
     eventNames.forEach((eventName) => {
       try {
-        canvas.on(eventName, () => {
-          scheduleMjTokenSync(0);
+        canvas.on(eventName, (payload) => {
+          rememberTokenSelectionSnapshot(payload);
+          updatePointedFromPayload(eventName, payload);
+          // Roll20 updates active selection asynchronously on some canvas events.
+          scheduleMjTokenSync(40, 4);
         });
         boundAny = true;
       } catch (_error) {}
@@ -284,6 +1199,92 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     if (boundAny) {
       MJ_CANVAS_SYNC_BOUND = true;
+    }
+  }
+
+  function bindTokenEditorSelectionSync() {
+    if (MJ_TOKEN_EDITOR_SYNC_BOUND) return;
+
+    const tokenEditor = window.d20?.token_editor;
+    if (!tokenEditor || typeof tokenEditor !== 'object') return;
+
+    const wrapMethodOn = (owner, methodName, afterCall) => {
+      if (!owner || (typeof owner !== 'object' && typeof owner !== 'function')) return false;
+      const original = owner[methodName];
+      if (typeof original !== 'function') return false;
+      if (original.__tmHudWrapped) return true;
+
+      const wrapped = function (...args) {
+        try {
+          args.forEach((arg) => rememberTokenSelectionSnapshot(arg));
+          rememberTokenSelectionSnapshot(this);
+          rememberTokenSelectionSnapshot(tokenEditor);
+        } catch (_error) {}
+
+        const result = original.apply(this, args);
+
+        try {
+          if (typeof afterCall === 'function') afterCall.call(this, args);
+        } catch (_error) {}
+
+        return result;
+      };
+
+      wrapped.__tmHudWrapped = true;
+      wrapped.__tmHudOriginal = original;
+
+      try {
+        owner[methodName] = wrapped;
+      } catch (_error) {
+        return false;
+      }
+
+      return owner[methodName] === wrapped;
+    };
+
+    const wrapMethod = (methodName, afterCall) => {
+      const proto = Object.getPrototypeOf(tokenEditor);
+      return (
+        wrapMethodOn(tokenEditor, methodName, afterCall) ||
+        wrapMethodOn(proto, methodName, afterCall)
+      );
+    };
+
+    const clearSnapshotIfNoSelection = () => {
+      setTimeout(() => {
+        const selectedModels = getSelectedGraphicModels();
+        if (selectedModels.length) return;
+        const snapshot = getTokenEditorSelectionSnapshot();
+        if (snapshot?.name || snapshot?.tokenId || snapshot?.represents) return;
+        LAST_TOKEN_EDITOR_SELECTION = null;
+        updateSelectedTokenDebugLabel();
+      }, 220);
+    };
+
+    let hookedAny = false;
+
+    hookedAny = wrapMethod('do_showRadialMenu', () => {
+      rememberTokenSelectionSnapshot(tokenEditor);
+      scheduleMjTokenSync(40, 4);
+    }) || hookedAny;
+
+    hookedAny = wrapMethod('showRadialMenu', () => {
+      rememberTokenSelectionSnapshot(tokenEditor);
+      scheduleMjTokenSync(40, 4);
+    }) || hookedAny;
+
+    hookedAny = wrapMethod('do_hideRadialMenu', () => {
+      scheduleMjTokenSync(40, 2);
+      clearSnapshotIfNoSelection();
+    }) || hookedAny;
+
+    hookedAny = wrapMethod('hideRadialMenu', () => {
+      scheduleMjTokenSync(40, 2);
+      clearSnapshotIfNoSelection();
+    }) || hookedAny;
+
+    if (hookedAny) {
+      MJ_TOKEN_EDITOR_SYNC_BOUND = true;
     }
   }
 
@@ -346,6 +1347,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     if (!root) return;
     const isMjMode = isCurrentPlayerGm();
     root.classList.toggle('tm-mode-mj', isMjMode);
+    updateSelectedTokenDebugLabel();
 
     const setToggleDisabledState = (toggleEl, disabled) => {
       if (!toggleEl) return;
@@ -369,7 +1371,17 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       roleBadge.textContent = isMjMode ? 'MJ' : 'PJ';
     }
 
-    if (isMjMode && currentPopup && (currentSection === 'characters' || currentSection === 'currency')) {
+    if (
+      isMjMode &&
+      currentPopup &&
+      (
+        currentSection === 'characters' ||
+        currentSection === 'currency' ||
+        currentSection === 'resource' ||
+        currentSection === 'traits' ||
+        currentSection === 'equipment'
+      )
+    ) {
       closePopup();
     }
 
@@ -1337,20 +2349,128 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     return Number.isFinite(parsed) ? String(parsed) : '--';
   }
 
+  function isNpcSheetCharacter(char) {
+    return getCharacterSheetType(char) === 'npc';
+  }
+
+  function getPreferredHpAttrModel(char) {
+    if (!char) return null;
+    if (isNpcSheetCharacter(char)) {
+      return getCharAttrModel(char, 'npc_hp') || getCharAttrModel(char, 'hp');
+    }
+    return getCharAttrModel(char, 'hp') || getCharAttrModel(char, 'npc_hp');
+  }
+
+  function getPreferredHpAttrName(char) {
+    return isNpcSheetCharacter(char) ? 'npc_hp' : 'hp';
+  }
+
+  function getPreferredAcAttrModel(char) {
+    if (!char) return null;
+    if (isNpcSheetCharacter(char)) {
+      return getCharAttrModel(char, 'npc_ac') || getCharAttrModel(char, 'ac');
+    }
+    return getCharAttrModel(char, 'ac') || getCharAttrModel(char, 'npc_ac');
+  }
+
+  function getPreferredHpMaxValue(char, hpAttr = null) {
+    const baseHpAttr = hpAttr || getPreferredHpAttrModel(char);
+    const fromHpMax = parseIntSafe(baseHpAttr?.get('max'), NaN);
+    if (Number.isFinite(fromHpMax)) return fromHpMax;
+
+    if (isNpcSheetCharacter(char)) {
+      const npcHpBase = getCharAttrModel(char, 'npc_hpbase');
+      const fromNpcBaseCurrent = parseIntSafe(npcHpBase?.get('current'), NaN);
+      if (Number.isFinite(fromNpcBaseCurrent)) return fromNpcBaseCurrent;
+      const fromNpcBaseMax = parseIntSafe(npcHpBase?.get('max'), NaN);
+      if (Number.isFinite(fromNpcBaseMax)) return fromNpcBaseMax;
+    }
+
+    const hpMaxAttr = getCharAttrModel(char, 'hp_max');
+    const fromHpMaxAttr = parseIntSafe(hpMaxAttr?.get('current'), NaN);
+    if (Number.isFinite(fromHpMaxAttr)) return fromHpMaxAttr;
+
+    return NaN;
+  }
+
+  function getMjSelectedTokenModel() {
+    if (!isCurrentPlayerGm()) return null;
+    if (typeof getSelectedGraphicModels !== 'function') return null;
+
+    const selected = getSelectedGraphicModels();
+    if (!Array.isArray(selected) || !selected.length) return null;
+
+    const withBar = selected.find((model) => {
+      const current = String(getGraphicField(model, ['bar3_value', 'bar3value']) || '').trim();
+      return Boolean(current);
+    });
+
+    return withBar || selected[0] || null;
+  }
+
+  function getMjSelectedTokenHpState() {
+    const tokenModel = getMjSelectedTokenModel();
+    if (!tokenModel) return null;
+
+    const current = parseIntSafe(getGraphicField(tokenModel, ['bar3_value', 'bar3value']), NaN);
+
+    return {
+      tokenModel,
+      hasCurrent: Number.isFinite(current),
+      current,
+    };
+  }
+
+  function adjustSelectedTokenHpCurrent(delta) {
+    const tokenState = getMjSelectedTokenHpState();
+    if (!tokenState?.tokenModel) return false;
+
+    const current = tokenState.hasCurrent ? tokenState.current : 0;
+    const char = getSelectedChar();
+    const max = char ? getPreferredHpMaxValue(char, getPreferredHpAttrModel(char)) : NaN;
+    let next = Math.max(0, current + delta);
+    if (Number.isFinite(max)) {
+      next = Math.min(next, max);
+    }
+
+    let changed = false;
+    if (typeof setGraphicField === 'function') {
+      changed = setGraphicField(tokenState.tokenModel, 'bar3_value', String(next)) || changed;
+    } else {
+      try {
+        if (typeof tokenState.tokenModel.set === 'function') {
+          const before = String(tokenState.tokenModel.get('bar3_value') || '').trim();
+          if (before !== String(next)) {
+            tokenState.tokenModel.set('bar3_value', String(next));
+            changed = true;
+          }
+        }
+      } catch (_error) {}
+    }
+
+    if (changed) {
+      try {
+        if (typeof tokenState.tokenModel.save === 'function') tokenState.tokenModel.save();
+      } catch (_error) {}
+    }
+
+    return true;
+  }
+
   function getHpState() {
     const char = getSelectedChar();
-    if (!char) {
+    const tokenHpState = getMjSelectedTokenHpState();
+    if (!char && !tokenHpState) {
       return { max: '--', current: '--', temp: '--', ca: '--', dv: '--' };
     }
 
-    const hpAttr = getCharAttrModel(char, 'hp');
-    const hpMaxAttr = getCharAttrModel(char, 'hp_max');
-    const hpTempAttr = getCharAttrModel(char, 'hp_temp');
-    const acAttr = getCharAttrModel(char, 'ac') || getCharAttrModel(char, 'npc_ac');
-    const hitDiceAttr = getHitDiceAttrModel(char);
+    const hpAttr = char ? getPreferredHpAttrModel(char) : null;
+    const hpTempAttr = char ? getCharAttrModel(char, 'hp_temp') : null;
+    const acAttr = char ? getPreferredAcAttrModel(char) : null;
+    const hitDiceAttr = char ? getHitDiceAttrModel(char) : null;
 
-    const maxRaw = hpAttr ? hpAttr.get('max') : hpMaxAttr?.get('current');
-    const currentRaw = hpAttr ? hpAttr.get('current') : null;
+    const maxRaw = char ? getPreferredHpMaxValue(char, hpAttr) : null;
+    const currentRaw = tokenHpState?.hasCurrent ? tokenHpState.current : hpAttr ? hpAttr.get('current') : null;
     const tempRaw = hpTempAttr ? hpTempAttr.get('current') : null;
     const caRaw = acAttr ? acAttr.get('current') : null;
     const dvRaw = hitDiceAttr ? hitDiceAttr.get('current') : null;
@@ -1375,10 +2495,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   function enforceCurrentHpCap() {
     const char = getSelectedChar();
     if (!char) return;
+    if (getMjSelectedTokenModel()) return;
 
-    const hpAttr = getCharAttrModel(char, 'hp');
-    const hpMaxAttr = getCharAttrModel(char, 'hp_max');
-    const maxValue = parseIntSafe(hpAttr?.get('max') ?? hpMaxAttr?.get('current'), NaN);
+    const hpAttr = getPreferredHpAttrModel(char);
+    const maxValue = getPreferredHpMaxValue(char, hpAttr);
     if (!Number.isFinite(maxValue)) return;
 
     const currentValue = parseIntSafe(hpAttr?.get('current'), NaN);
@@ -1389,7 +2509,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       hpAttr.set('current', String(maxValue));
       if (typeof hpAttr.save === 'function') hpAttr.save();
     } else if (char.attribs && typeof char.attribs.create === 'function') {
-      char.attribs.create({ name: 'hp', current: String(maxValue), max: String(maxValue) });
+      char.attribs.create({ name: getPreferredHpAttrName(char), current: String(maxValue), max: String(maxValue) });
     }
   }
 
@@ -1416,10 +2536,15 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   }
 
   function adjustHpValue(target, delta) {
+    if (target === 'current' && adjustSelectedTokenHpCurrent(delta)) {
+      renderHpState();
+      return;
+    }
+
     const char = getSelectedChar();
     if (!char) return;
 
-    let attrName = 'hp';
+    let attrName = getPreferredHpAttrName(char);
     let attr = null;
 
     if (target === 'temp') {
@@ -1429,16 +2554,14 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       attrName = 'hit_dice';
       attr = getHitDiceAttrModel(char);
     } else {
-      attr = getCharAttrModel(char, attrName);
+      attr = getPreferredHpAttrModel(char);
     }
 
     const current = parseIntSafe(attr?.get('current'), 0);
     let next = Math.max(0, current + delta);
 
     if (target === 'current') {
-      const hpAttr = getCharAttrModel(char, 'hp');
-      const hpMaxAttr = getCharAttrModel(char, 'hp_max');
-      const maxValue = parseIntSafe(hpAttr?.get('max') ?? hpMaxAttr?.get('current'), NaN);
+      const maxValue = getPreferredHpMaxValue(char, attr);
       if (Number.isFinite(maxValue)) {
         next = Math.min(next, maxValue);
       }
@@ -2588,7 +3711,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
     const char = getSelectedChar();
     if (!char) return;
 
-    const acAttr = getCharAttrModel(char, 'ac') || getCharAttrModel(char, 'npc_ac');
+    const acAttr =
+      (typeof getPreferredAcAttrModel === 'function' && getPreferredAcAttrModel(char)) ||
+      getCharAttrModel(char, 'ac') ||
+      getCharAttrModel(char, 'npc_ac');
     if (!acAttr) return;
 
     const currentAc = parseIntSafe(acAttr.get('current'), NaN);
@@ -4605,6 +5731,9 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         <div class="toggle settings" data-sec="settings" data-label="Réglages">⚙️</div>
       </div>
       <div id="tm-roll-hp-wrap">
+        <div id="tm-selected-token-debug" data-selected-token-debug data-label="Token sélectionné sur la map">
+          Token sélectionné : aucun
+        </div>
         <div id="tm-stats-grid" data-label="Combat, points de vie et modes">
           <div class="tm-stats-col" data-col="1">
             <button class="hp-value" data-hp-value="max" data-label="HP Max : --">
@@ -4748,6 +5877,15 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       display:none;
     }
 
+    #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="3"],
+    #tm-root.tm-mode-mj #tm-stats-grid .tm-stats-col[data-col="5"]{
+      display:none;
+    }
+
+    #tm-root.tm-mode-mj #tm-mid-col{
+      display:none;
+    }
+
     #tm-root .toggle.icon-only{
       width:var(--tm-cell-size);
       min-width:var(--tm-cell-size);
@@ -4780,7 +5918,35 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     #tm-roll-hp-wrap{
       display:flex;
+      flex-direction:column;
+      align-items:flex-start;
+      gap:4px;
+    }
+
+    #tm-selected-token-debug{
+      display:none;
+      width:calc((var(--tm-cell-size) * 3) + (var(--tm-cell-gap) * 2));
+      height:22px;
+      min-height:22px;
+      border:1px solid rgba(185,185,185,0.85);
+      border-radius:6px;
+      box-sizing:border-box;
+      background:rgba(95,95,95,0.95);
+      color:#fff;
+      font-size:10px;
+      font-weight:700;
+      line-height:1;
+      padding:0 8px;
       align-items:center;
+      justify-content:flex-start;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      text-shadow:none;
+    }
+
+    #tm-root.tm-mode-mj #tm-selected-token-debug{
+      display:flex;
     }
 
     #tm-popup-zone{
@@ -6061,7 +7227,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
   window.addEventListener('mouseup', () => {
     if (!isCurrentPlayerGm()) return;
-    scheduleMjTokenSync(0);
+    scheduleMjTokenSync(40, 4);
   });
 
   window.addEventListener('pointercancel', (e) => {
@@ -6353,9 +7519,10 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 /* ================= INIT ================= */
 
   bindMjCanvasSelectionSync();
+  bindTokenEditorSelectionSync();
 
   if (isCurrentPlayerGm()) {
-    scheduleMjTokenSync(0);
+    scheduleMjTokenSync(40, 4);
   }
 
   prefetchAvailableCharacterAttributes();
@@ -6369,6 +7536,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
   setRollMode(detectRollMode(), false);
   setTimeout(syncRollModeFromSheet, 1000);
   setInterval(() => {
+    bindTokenEditorSelectionSync();
     const switchedByMjToken = syncHudCharacterFromSelectedToken();
     if (switchedByMjToken) return;
     prefetchAvailableCharacterAttributes();
