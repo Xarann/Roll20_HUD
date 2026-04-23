@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Roll20 HUD Next (Full)
 // @namespace    http://tampermonkey.net/
-// @version      8.00
+// @version      8.07
 // @match        https://app.roll20.net/editor/
 // @grant        none
 // ==/UserScript==
@@ -1035,7 +1035,6 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     const isMjMode = isCurrentPlayerGm();
     const tokenName = isMjMode ? getSelectedMapTokenName() : '';
-    const selectedCount = getSelectedGraphicModels().length;
     const editorSnapshot = isMjMode ? getTokenEditorSelectionSnapshot() : null;
     const uiSnapshot = isMjMode ? (readUiOverlaySelectionSnapshot() || LAST_UI_OVERLAY_SELECTION) : null;
     const label =
@@ -1043,17 +1042,11 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
       (editorSnapshot?.name
         ? editorSnapshot.name
         : uiSnapshot?.name
-          ? `ui:${uiSnapshot.name}`
-        : editorSnapshot?.tokenId
-          ? `id:${String(editorSnapshot.tokenId).slice(0, 10)}`
-          : editorSnapshot?.represents
-            ? `rep:${String(editorSnapshot.represents).slice(0, 10)}`
-            : selectedCount > 0
-              ? `sélection (${selectedCount})`
-              : 'aucun');
+          ? uiSnapshot.name
+          : '');
 
-    debugBox.textContent = `Token sélectionné : ${label}`;
-    debugBox.dataset.label = `Token sélectionné sur la map : ${label}`;
+    debugBox.textContent = label;
+    debugBox.dataset.label = label;
   }
 
   function getCharacterFromSelectedToken() {
@@ -5753,8 +5746,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
         <div class="toggle settings" data-sec="settings" data-label="Réglages">⚙️</div>
       </div>
       <div id="tm-roll-hp-wrap">
-        <div id="tm-selected-token-debug" data-selected-token-debug data-label="Token sélectionné sur la map">
-          Token sélectionné : aucun
+        <div id="tm-selected-token-debug" data-selected-token-debug data-label="">
+          
         </div>
         <div id="tm-stats-grid" data-label="Combat, points de vie et modes">
           <div class="tm-stats-col" data-col="1">
@@ -5955,7 +5948,7 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     #tm-selected-token-debug{
       display:none;
-      width:calc((var(--tm-cell-size) * 3) + (var(--tm-cell-gap) * 2));
+      width:calc((var(--tm-cell-size) * 4) + (var(--tm-cell-gap) * 3));
       height:22px;
       min-height:22px;
       border:1px solid rgba(185,185,185,0.85);
@@ -5977,7 +5970,8 @@ const BASE = 'https://raw.githubusercontent.com/Xarann/Roll20_HUD/main/icons/';
 
     #tm-root.tm-mode-mj #tm-selected-token-debug{
       display:flex;
-      width:calc((var(--tm-cell-size) * 2) + var(--tm-cell-gap));
+      width:calc((var(--tm-cell-size) * 3) + (var(--tm-cell-gap) * 2));
+      margin-left:calc((var(--tm-cell-size) + var(--tm-cell-gap)) * -1);
     }
 
     #tm-popup-zone{
