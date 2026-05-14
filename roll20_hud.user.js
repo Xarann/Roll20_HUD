@@ -2,7 +2,7 @@
 // @name         Roll20 HUD Next (Full)
 // @namespace    http://tampermonkey.net/
 // @version      8.08
-// @match        https://app.roll20.net/editor/
+// @match        https://app.roll20.net/editor
 // @grant        none
 // ==/UserScript==
 
